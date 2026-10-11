@@ -1,0 +1,1 @@
+{"pre_seconds":2,"post_seconds":2,"sku_map":{"0":"oat","1":"coffee","2":"bar","3":"chips"},"trays":{"tray-a":{"roi":[0,0,0.5,1],"motion_threshold":8,"hysteresis_g":8},"tray-b":{"roi":[0.5,0,1,1],"motion_threshold":8,"hysteresis_g":8}}}

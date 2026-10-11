@@ -1,0 +1,16 @@
+{
+  "source": "NO_PHYSICAL_TRIAL",
+  "hardware_verified": false,
+  "interaction_count": 0,
+  "sku_precision": null,
+  "sku_recall": null,
+  "quantity_accuracy": null,
+  "ownership_accuracy": null,
+  "false_charge_rate": null,
+  "missed_events": null,
+  "pending_review_rate": null,
+  "identity_failures": null,
+  "data_loss": null,
+  "latency_ms": {"p50": null, "p95": null, "p99": null},
+  "note": "Unavailable values are not zeros. Simulation/tests do not establish physical accuracy or shopping latency."
+}

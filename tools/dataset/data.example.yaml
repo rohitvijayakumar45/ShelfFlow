@@ -1,0 +1,9 @@
+path: ../../data/dataset
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: oat
+  1: coffee
+  2: bar
+  3: chips

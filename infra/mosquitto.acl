@@ -1,0 +1,29 @@
+user ingestor
+topic read shelfflow/devices/+/events
+topic read shelfflow/devices/gate-1/gate-ack
+topic write shelfflow/devices/+/acks
+topic write shelfflow/devices/+/commands
+
+user sensor-1
+topic write shelfflow/devices/sensor-1/events
+topic write shelfflow/devices/sensor-1/availability
+topic read shelfflow/devices/sensor-1/acks
+topic read shelfflow/devices/sensor-1/commands
+
+user gate-1
+topic write shelfflow/devices/gate-1/gate-ack
+topic write shelfflow/devices/gate-1/events
+topic write shelfflow/devices/gate-1/availability
+topic read shelfflow/devices/gate-1/acks
+topic read shelfflow/devices/gate-1/commands
+
+user vision-1
+topic read shelfflow/devices/sensor-1/events
+topic write shelfflow/devices/vision-1/events
+topic write shelfflow/devices/vision-1/availability
+topic read shelfflow/devices/vision-1/acks
+topic read shelfflow/devices/vision-1/commands
+
+user simulator
+topic write shelfflow/devices/simulator/events
+topic read shelfflow/devices/simulator/acks

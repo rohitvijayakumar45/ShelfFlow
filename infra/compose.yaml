@@ -1,0 +1,104 @@
+name: shelfflow
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile.backend
+  env_file: ../.env
+  environment: &environment
+    DATABASE_URL: postgresql+psycopg://shelfflow:${POSTGRES_PASSWORD:-local-compose-db}@postgres:5432/shelfflow
+    REDIS_URL: redis://redis:6379/0
+    MQTT_HOST: mosquitto
+    MQTT_USERNAME: ingestor
+    MQTT_PASSWORD: ${MQTT_PASSWORD:-change-me}
+    EVIDENCE_ROOT: /evidence
+  volumes:
+    - ../evidence:/evidence
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+services:
+  postgres:
+    image: postgres:16.8-alpine
+    environment:
+      POSTGRES_DB: shelfflow
+      POSTGRES_USER: shelfflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-compose-db}
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U shelfflow"]
+      interval: 5s
+      retries: 20
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      retries: 20
+  broker-auth:
+    image: eclipse-mosquitto:2.0.21
+    user: root
+    environment:
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-change-me}
+    volumes: [broker-auth:/auth]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'mosquitto_passwd -b -c /auth/passwords ingestor "$$MQTT_PASSWORD"; for name in sensor-1 gate-1 vision-1 simulator; do mosquitto_passwd -b /auth/passwords "$$name" "$$MQTT_PASSWORD"; done; chown 1883:1883 /auth/passwords; chmod 600 /auth/passwords'
+  mosquitto:
+    image: eclipse-mosquitto:2.0.21
+    depends_on:
+      broker-auth: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:1883:1883"]
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.acl:/mosquitto/config/acl:ro
+      - broker-auth:/auth:ro
+      - broker-data:/mosquitto/data
+  migrate:
+    <<: *backend
+    command: [sh, -c, "alembic upgrade head && python -m backend.seed"]
+  backend:
+    <<: *backend
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  ingestor:
+    <<: *backend
+    command: [python, -m, backend.mqtt]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      mosquitto: {condition: service_started}
+    restart: unless-stopped
+  worker:
+    <<: *backend
+    command: [rq, worker, --url, "redis://redis:6379/0"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  scheduler:
+    <<: *backend
+    command: [python, -m, backend.jobs]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+  customer:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.app
+      args: {APP: customer}
+    ports: ["127.0.0.1:5173:80"]
+    depends_on: [backend]
+  staff:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.app
+      args: {APP: staff}
+    ports: ["127.0.0.1:5174:80"]
+    depends_on: [backend]
+volumes:
+  postgres:
+  redis:
+  broker-auth:
+  broker-data:

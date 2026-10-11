@@ -1,0 +1,2405 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ShelfFlow",
+    "description": "Continuous single-camera smart-store prototype. Simulation is explicitly labelled; real ownership is review-first.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/customer": {
+      "post": {
+        "summary": "Login Customer",
+        "operationId": "login_customer_auth_customer_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/staff": {
+      "post": {
+        "summary": "Login Staff",
+        "operationId": "login_staff_auth_staff_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customer/cart": {
+      "get": {
+        "summary": "Customer Cart",
+        "operationId": "customer_cart_customer_cart_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/customer/entry-token": {
+      "post": {
+        "summary": "Qr",
+        "operationId": "qr_customer_entry_token_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/gate/dispense": {
+      "post": {
+        "summary": "Dispense",
+        "operationId": "dispense_gate_dispense_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Dispense"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/devices/gate-1/ack": {
+      "post": {
+        "summary": "Acknowledge",
+        "operationId": "acknowledge_devices_gate_1_ack_post",
+        "parameters": [
+          {
+            "name": "x-device-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Device-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GateAck"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/devices/{device_id}/events": {
+      "post": {
+        "summary": "Event",
+        "operationId": "event_devices__device_id__events_post",
+        "parameters": [
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "x-device-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Device-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceEvent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/devices/vision-1/bindings": {
+      "get": {
+        "summary": "Vision Bindings",
+        "operationId": "vision_bindings_devices_vision_1_bindings_get",
+        "parameters": [
+          {
+            "name": "x-device-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Device-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/devices/vision-1/config": {
+      "get": {
+        "summary": "Vision Config",
+        "operationId": "vision_config_devices_vision_1_config_get",
+        "parameters": [
+          {
+            "name": "x-device-key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Device-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/customer/checkout": {
+      "post": {
+        "summary": "Pay",
+        "operationId": "pay_customer_checkout_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Checkout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/gates/{command_id}/cancel": {
+      "post": {
+        "summary": "Cancel Gate",
+        "operationId": "cancel_gate_staff_gates__command_id__cancel_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelGate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/customer-accounts": {
+      "post": {
+        "summary": "Provision Account",
+        "operationId": "provision_account_staff_customer_accounts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProvisionAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/customer/disputes/{hypothesis_id}": {
+      "post": {
+        "summary": "Dispute",
+        "operationId": "dispute_customer_disputes__hypothesis_id__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "hypothesis_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Hypothesis Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reason"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/state": {
+      "get": {
+        "summary": "State",
+        "operationId": "state_staff_state_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/simulation/interaction": {
+      "post": {
+        "summary": "Simulate",
+        "operationId": "simulate_staff_simulation_interaction_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimInteraction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/simulation/gate": {
+      "post": {
+        "summary": "Simulate Gate",
+        "operationId": "simulate_gate_staff_simulation_gate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimGate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/review/{hypothesis_id}": {
+      "post": {
+        "summary": "Review",
+        "operationId": "review_staff_review__hypothesis_id__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "hypothesis_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Hypothesis Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Review"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/corrections/{hypothesis_id}": {
+      "post": {
+        "summary": "Correction",
+        "operationId": "correction_staff_corrections__hypothesis_id__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "hypothesis_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Hypothesis Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectionBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/reconciliation": {
+      "post": {
+        "summary": "Reconciliation",
+        "operationId": "reconciliation_staff_reconciliation_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reconcile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/order-reconcile": {
+      "post": {
+        "summary": "Order Reconcile",
+        "operationId": "order_reconcile_staff_order_reconcile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reconcile"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/assisted-checkout": {
+      "post": {
+        "summary": "Assisted Payment",
+        "operationId": "assisted_payment_staff_assisted_checkout_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistedPayment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/gate-reset": {
+      "post": {
+        "summary": "Gate Reset",
+        "operationId": "gate_reset_staff_gate_reset_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reason"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/camera/preview": {
+      "get": {
+        "summary": "Camera Preview",
+        "operationId": "camera_preview_staff_camera_preview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/manual-assignment": {
+      "post": {
+        "summary": "Manual",
+        "operationId": "manual_staff_manual_assignment_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Manual"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/staff/bracelets/{bracelet_id}/setup": {
+      "post": {
+        "summary": "Bracelet Setup",
+        "operationId": "bracelet_setup_staff_bracelets__bracelet_id__setup_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bracelet_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bracelet Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BraceletSetup"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/bracelets/{bracelet_id}/return": {
+      "post": {
+        "summary": "Return Bracelet",
+        "operationId": "return_bracelet_staff_bracelets__bracelet_id__return_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bracelet_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bracelet Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BraceletReturn"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/trays/{tray_id}/restock": {
+      "post": {
+        "summary": "Restock",
+        "operationId": "restock_staff_trays__tray_id__restock_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tray_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Restock"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/products/{product_id}": {
+      "post": {
+        "summary": "Product Setup",
+        "operationId": "product_setup_staff_products__product_id__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "product_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Product Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductSetup"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/trays/{tray_id}/setup": {
+      "post": {
+        "summary": "Tray Setup",
+        "operationId": "tray_setup_staff_trays__tray_id__setup_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tray_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraySetup"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/trays/{tray_id}/calibration": {
+      "post": {
+        "summary": "Calibrate",
+        "operationId": "calibrate_staff_trays__tray_id__calibration_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "tray_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Tray Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Calibrate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/evidence/{event_id}": {
+      "get": {
+        "summary": "Evidence Metadata",
+        "operationId": "evidence_metadata_staff_evidence__event_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/staff/evidence-file/{file_name}": {
+      "get": {
+        "summary": "Evidence File",
+        "operationId": "evidence_file_staff_evidence_file__file_name__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "file_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "File Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AssistedPayment": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Idempotency Key"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "FAILURE",
+              "TIMEOUT"
+            ],
+            "title": "Outcome",
+            "default": "SUCCESS"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "idempotency_key",
+          "session_id"
+        ],
+        "title": "AssistedPayment"
+      },
+      "BraceletReturn": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "cleaned": {
+            "type": "boolean",
+            "title": "Cleaned",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "BraceletReturn"
+      },
+      "BraceletSetup": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "rfid": {
+            "type": "string",
+            "pattern": "^(?:[0-9A-F]{8}|[0-9A-F]{14}|[0-9A-F]{20})$",
+            "title": "Rfid"
+          },
+          "markers": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Markers"
+          },
+          "cleaned": {
+            "type": "boolean",
+            "title": "Cleaned"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "rfid",
+          "markers",
+          "cleaned"
+        ],
+        "title": "BraceletSetup"
+      },
+      "Calibrate": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "zero_raw": {
+            "type": "number",
+            "title": "Zero Raw"
+          },
+          "mass_raw": {
+            "type": "number",
+            "title": "Mass Raw"
+          },
+          "known_mass_g": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Known Mass G"
+          },
+          "noise_g": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Noise G"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "zero_raw",
+          "mass_raw",
+          "known_mass_g",
+          "noise_g",
+          "version"
+        ],
+        "title": "Calibrate"
+      },
+      "CancelGate": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "actual_uid": {
+            "type": "string",
+            "title": "Actual Uid"
+          },
+          "physically_recovered": {
+            "type": "boolean",
+            "title": "Physically Recovered"
+          },
+          "cleaned": {
+            "type": "boolean",
+            "title": "Cleaned",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "actual_uid",
+          "physically_recovered"
+        ],
+        "title": "CancelGate"
+      },
+      "Candidate": {
+        "properties": {
+          "marker_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Marker Ids"
+          },
+          "rfid_uid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfid Uid"
+          },
+          "product_id": {
+            "type": "string",
+            "title": "Product Id"
+          },
+          "product_track": {
+            "type": "string",
+            "title": "Product Track"
+          },
+          "hand_track": {
+            "type": "string",
+            "title": "Hand Track"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "PICKUP",
+              "RETURN"
+            ],
+            "title": "Action"
+          },
+          "quantity": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Quantity"
+          },
+          "identity": {
+            "type": "boolean",
+            "title": "Identity",
+            "default": false
+          },
+          "hand_product": {
+            "type": "boolean",
+            "title": "Hand Product",
+            "default": false
+          },
+          "trajectory": {
+            "type": "boolean",
+            "title": "Trajectory",
+            "default": false
+          },
+          "sku": {
+            "type": "boolean",
+            "title": "Sku",
+            "default": false
+          },
+          "temporal": {
+            "type": "boolean",
+            "title": "Temporal",
+            "default": false
+          },
+          "bracelet_hand": {
+            "type": "boolean",
+            "title": "Bracelet Hand",
+            "default": false
+          },
+          "opposite_hand": {
+            "type": "boolean",
+            "title": "Opposite Hand",
+            "default": false
+          },
+          "handoff": {
+            "type": "boolean",
+            "title": "Handoff",
+            "default": false
+          },
+          "crossed": {
+            "type": "boolean",
+            "title": "Crossed",
+            "default": false
+          },
+          "occluded": {
+            "type": "boolean",
+            "title": "Occluded",
+            "default": false
+          },
+          "detector_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Detector Confidence",
+            "default": 0
+          },
+          "chain_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Chain Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product_id",
+          "product_track",
+          "hand_track",
+          "action",
+          "quantity"
+        ],
+        "title": "Candidate"
+      },
+      "Checkout": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Idempotency Key"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "FAILURE",
+              "TIMEOUT"
+            ],
+            "title": "Outcome",
+            "default": "SUCCESS"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "Checkout"
+      },
+      "CorrectionBody": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "product_id": {
+            "type": "string",
+            "title": "Product Id"
+          },
+          "quantity_delta": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": -10.0,
+            "title": "Quantity Delta"
+          },
+          "inventory_delta": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": -10.0,
+            "title": "Inventory Delta"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "session_id",
+          "product_id",
+          "quantity_delta",
+          "inventory_delta",
+          "idempotency_key"
+        ],
+        "title": "CorrectionBody"
+      },
+      "DeviceEvent": {
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Schema Version",
+            "default": 1
+          },
+          "event_id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Event Id"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "INTERACTION",
+              "WEIGHT",
+              "RFID",
+              "HEALTH",
+              "BARRIER"
+            ],
+            "title": "Event Type"
+          },
+          "device_id": {
+            "type": "string",
+            "title": "Device Id"
+          },
+          "boot_id": {
+            "type": "string",
+            "title": "Boot Id"
+          },
+          "sequence_number": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Sequence Number"
+          },
+          "shelf_id": {
+            "type": "string",
+            "title": "Shelf Id",
+            "default": "shelf-1"
+          },
+          "tray_id": {
+            "type": "string",
+            "title": "Tray Id",
+            "default": "tray-a"
+          },
+          "capture_start": {
+            "type": "number",
+            "title": "Capture Start"
+          },
+          "capture_end": {
+            "type": "number",
+            "title": "Capture End"
+          },
+          "monotonic_ms": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Monotonic Ms"
+          },
+          "clock_synced": {
+            "type": "boolean",
+            "title": "Clock Synced"
+          },
+          "clock_uncertainty_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Clock Uncertainty Ms"
+          },
+          "calibration_version": {
+            "type": "string",
+            "title": "Calibration Version"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Weight"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "title": "Evidence Refs"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Candidates"
+          },
+          "sensor_health": {
+            "$ref": "#/components/schemas/Health"
+          },
+          "frame_age_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Frame Age Ms",
+            "default": 0
+          },
+          "blur": {
+            "type": "boolean",
+            "title": "Blur",
+            "default": false
+          },
+          "frame_gap_ms": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Frame Gap Ms",
+            "default": 0
+          },
+          "model_status": {
+            "type": "string",
+            "enum": [
+              "MOCK",
+              "TRAINED",
+              "MODEL_UNAVAILABLE"
+            ],
+            "title": "Model Status",
+            "default": "MODEL_UNAVAILABLE"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "event_type",
+          "device_id",
+          "boot_id",
+          "sequence_number",
+          "capture_start",
+          "capture_end",
+          "monotonic_ms",
+          "clock_synced",
+          "clock_uncertainty_ms",
+          "calibration_version"
+        ],
+        "title": "DeviceEvent"
+      },
+      "Dispense": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          },
+          "command_id": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Command Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "token",
+          "command_id"
+        ],
+        "title": "Dispense"
+      },
+      "GateAck": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "title": "Command Id"
+          },
+          "actual_uid": {
+            "type": "string",
+            "title": "Actual Uid"
+          },
+          "released": {
+            "type": "boolean",
+            "title": "Released"
+          },
+          "position_ok": {
+            "type": "boolean",
+            "title": "Position Ok"
+          },
+          "fault": {
+            "type": "string",
+            "title": "Fault",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "actual_uid",
+          "released",
+          "position_ok"
+        ],
+        "title": "GateAck"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Health": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 30,
+            "title": "Flags"
+          },
+          "queue_overflow": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Queue Overflow",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Health"
+      },
+      "Login": {
+        "properties": {
+          "alias": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Alias",
+            "default": "Shopper"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Password",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "Login"
+      },
+      "Manual": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "bracelet_id": {
+            "type": "string",
+            "title": "Bracelet Id"
+          },
+          "actual_uid": {
+            "type": "string",
+            "title": "Actual Uid"
+          },
+          "physical_confirmed": {
+            "type": "boolean",
+            "title": "Physical Confirmed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "session_id",
+          "bracelet_id",
+          "actual_uid",
+          "physical_confirmed"
+        ],
+        "title": "Manual"
+      },
+      "ProductSetup": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "price_minor": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Price Minor"
+          },
+          "unit_g": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Unit G"
+          },
+          "tolerance_g": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Tolerance G"
+          },
+          "measured": {
+            "type": "boolean",
+            "title": "Measured"
+          },
+          "sample_weights_g": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "title": "Sample Weights G"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "price_minor",
+          "unit_g",
+          "tolerance_g",
+          "measured"
+        ],
+        "title": "ProductSetup"
+      },
+      "ProvisionAccount": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "username": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 3,
+            "pattern": "^[A-Za-z0-9_.-]+$",
+            "title": "Username"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 12,
+            "title": "Password"
+          },
+          "alias": {
+            "type": "string",
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Alias"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "username",
+          "password",
+          "alias"
+        ],
+        "title": "ProvisionAccount"
+      },
+      "Reason": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "Reason"
+      },
+      "Reconcile": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "session_id"
+        ],
+        "title": "Reconcile"
+      },
+      "Restock": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "delta": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Delta"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "delta",
+          "idempotency_key"
+        ],
+        "title": "Restock"
+      },
+      "Review": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "CONFIRM",
+              "DISMISS"
+            ],
+            "title": "Decision"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "quantity": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Quantity",
+            "default": 1
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason",
+          "decision"
+        ],
+        "title": "Review"
+      },
+      "SimGate": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "title": "Command Id"
+          },
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "JAM",
+              "WRONG_UID",
+              "UNCERTAIN_RELEASE"
+            ],
+            "title": "Scenario"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "scenario"
+        ],
+        "title": "SimGate"
+      },
+      "SimInteraction": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "tray_id": {
+            "type": "string",
+            "title": "Tray Id"
+          },
+          "scenario": {
+            "type": "string",
+            "enum": [
+              "PICKUP",
+              "RETURN",
+              "HIDDEN_MARKER",
+              "CROSSED_HANDS",
+              "CAMERA_FAILURE",
+              "WEIGHT_FAULT"
+            ],
+            "title": "Scenario"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "session_id",
+          "tray_id",
+          "scenario"
+        ],
+        "title": "SimInteraction"
+      },
+      "TraySetup": {
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "title": "Product Id"
+          },
+          "roi": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "maxItems": 4,
+            "minItems": 4,
+            "title": "Roi"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product_id",
+          "roi"
+        ],
+        "title": "TraySetup"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "Weight": {
+        "properties": {
+          "pre_g": {
+            "type": "number",
+            "title": "Pre G"
+          },
+          "post_g": {
+            "type": "number",
+            "title": "Post G"
+          },
+          "raw": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw"
+          },
+          "filtered": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filtered"
+          },
+          "noise_g": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Noise G"
+          },
+          "settled": {
+            "type": "boolean",
+            "title": "Settled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "pre_g",
+          "post_g",
+          "noise_g",
+          "settled"
+        ],
+        "title": "Weight"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+.venv
+apps/node_modules
+apps/*/dist
+**/.pio
+.env
+data
+evidence
+models
+**/secrets.h
+**/__pycache__
+.git

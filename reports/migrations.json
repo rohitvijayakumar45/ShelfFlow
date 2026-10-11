@@ -1,0 +1,36 @@
+{
+  "database": "SQLite (PostgreSQL not available)",
+  "steps": [
+    {
+      "command": [
+        "alembic",
+        "upgrade",
+        "head"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "backend.seed"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "alembic",
+        "downgrade",
+        "base"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "alembic",
+        "upgrade",
+        "head"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "schema_differences": []
+}

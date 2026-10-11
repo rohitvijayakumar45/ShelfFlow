@@ -1,0 +1,1 @@
+{"name":"@shelfflow/customer","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1 --port 5173","build":"tsc --noEmit && vite build","preview":"vite preview --port 5173"}}
