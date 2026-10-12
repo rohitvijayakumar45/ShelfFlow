@@ -57,6 +57,8 @@ Includes migrations, seeding, apps, PostgreSQL, Redis, Mosquitto, durable MQTT i
 - [Demo walkthrough](docs/demo.md)
 - [Hardware, BOM and wiring](docs/wiring.md) and [placement drawing](docs/placement.svg)
 - [Use the spare ESP32 as a programmer](docs/programming-camera.md)
+- [Shelf sensor controller step-by-step bring-up](docs/sensor-controller-bringup.md)
+- [Requirements audit, 12 Oct 2026](docs/audit-2026-10-12.md)
 - [Dataset capture, annotation and training](docs/dataset.md)
 - [Event contracts, fusion and recovery](docs/architecture.md)
 - [Security and retention](docs/security.md)

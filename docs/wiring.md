@@ -8,6 +8,9 @@ The sensor and gate targets select a **separate ESP32-DevKitC V4 with ESP32-WROO
 
 ## Bill of materials
 
+Reported as owned (12 Oct 2026): camera board + OV3660, one ordinary ESP32 (programmer, then sensor controller), one RC522. **Still to obtain:** gate ESP32, second RC522 for the gate, 2× HX711, 2× load cells, servo, release beam, position switch, supplies. Step-by-step connections: [programming-camera.md](programming-camera.md) (camera flashing through the spare ESP32) and [sensor-controller-bringup.md](sensor-controller-bringup.md) (RC522 + trays).
+
+
 | Qty | Component | Required specification / assumption |
 |---:|---|---|
 | 1 existing | ESP32 camera + OV3660 | Exact carrier, PSRAM, lens and pins to be confirmed |
@@ -24,6 +27,7 @@ The sensor and gate targets select a **separate ESP32-DevKitC V4 with ESP32-WROO
 | As sized | Regulated low-voltage supplies | Board input ratings; isolated actuator supply and USB power plan |
 | 2 | Rigid isolated trays | One SKU each; independent force paths |
 | 1 | Return bin | Staff confirms return and cleaning in app |
+| 1 | 5 V ≥ 2 A regulated supply for the camera board | USB 5 V through jumper wires is enough for flashing only, not Wi-Fi capture |
 | 1 laptop + phone optional | Laptop and gate browser camera | Shelf camera is never repurposed for gate scanning |
 
 Passive bracelet identifiers are not secure credentials. Multiple marker faces use different IDs mapped to the same bracelet. Keep black/white contrast, quiet border, rigid face and wrist orientation visible.

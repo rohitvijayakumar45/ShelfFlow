@@ -13,7 +13,7 @@ struct TrayState {
   HX711 hx;const char* id;float zero=0,scale=0,values[12]={0},baseline=0;String version="UNSET";
   unsigned count=0,index=0;bool baselineSet=false;uint32_t stableSince=0,lastReady=0,lastChange=0;long lastRaw=0;
 } trays[2];
-uint32_t lastRfid=0,lastHealth=0;String lastUid="";
+uint32_t lastRfid=0,lastHealth=0,lastDiag=0;String lastUid="";
 String barrierId="";uint32_t barrierRequested=0;
 
 void sample(TrayState& t){
@@ -56,9 +56,14 @@ void loop(){
   if(barrierId.length()&&bus.empty()&&now-barrierRequested>1500){JsonDocument d;bus.envelope(d,"BARRIER","tray-a","UNSET");d["evidence_refs"].add("BARRIER:"+barrierId);bus.persist(d);barrierId="";}
   if(now-lastRfid>=100){lastRfid=now;if(reader.PICC_IsNewCardPresent()&&reader.PICC_ReadCardSerial()){
     String uid="";for(byte i=0;i<reader.uid.size;i++){if(reader.uid.uidByte[i]<16)uid+="0";uid+=String(reader.uid.uidByte[i],HEX);}uid.toUpperCase();
+    Serial.println("DIAG RFID uid="+uid);
     JsonDocument d;bus.envelope(d,"RFID","tray-a","UNSET");d["evidence_refs"].add("RFID:"+uid);bus.persist(d);
     // One provisional reader marks a local zone, not the whole shelf. Both trays remain observed visually.
     reader.PICC_HaltA();reader.PCD_StopCrypto1();}}
+  // Bench bring-up output: raw counts work before calibration, Wi-Fi or MQTT exist.
+  if(now-lastDiag>=1000){lastDiag=now;Serial.printf("DIAG raw tray-a=%ld%s tray-b=%ld%s rc522_version=0x%02X wifi=%s mqtt=%s fs=%s\n",
+    trays[0].lastRaw,now-trays[0].lastReady>1000?"(NO_DATA)":"",trays[1].lastRaw,now-trays[1].lastReady>1000?"(NO_DATA)":"",
+    reader.PCD_ReadRegister(MFRC522::VersionReg),WiFi.status()==WL_CONNECTED?"up":"down",bus.mqtt.connected()?"up":"down",bus.storageOK?"ok":"MISSING");}
   if(now-lastHealth>=500){lastHealth=now;for(auto& t:trays){JsonDocument d;bus.envelope(d,"HEALTH",t.id,t.version.c_str());
     if(now-t.lastReady>1000){d["sensor_health"]["flags"].add("DISCONNECTED");d["sensor_health"]["ok"]=false;}
     if(!t.scale){d["sensor_health"]["flags"].add("UNCALIBRATED");d["sensor_health"]["ok"]=false;}

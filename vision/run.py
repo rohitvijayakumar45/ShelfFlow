@@ -51,6 +51,13 @@ def run(args):
     mqtt_client.on_connect,mqtt_client.on_message=connected,message
     mqtt_client.connect(args.mqtt,int(os.getenv('MQTT_PORT','1883')),30);mqtt_client.loop_start()
     spool=Path(args.spool);spool.mkdir(parents=True,exist_ok=True)
+    high=[None]
+    def set_high(enabled):
+        # Mode B switches only on state change; a failed switch is recorded, never fatal to capture.
+        if args.mode!='B' or high[0]==enabled:return
+        try:capture.high_resolution(enabled);high[0]=enabled
+        except Exception:
+            for collector in active.values():collector['sources'].add('RESOLUTION_SWITCH_FAILED')
     last_heartbeat=0;cooldown={}; frame_detections={}; last_gap=0;blur=False;last_config=0
     def trigger(tray,source,weight=None):
         now=time.monotonic()
@@ -60,7 +67,7 @@ def run(args):
             active[tray]['finish']=min(now+config.get('post_seconds',2),active[tray]['deadline'])
             return
         active[tray]={'id':uuid.uuid4().hex,'start':now-config.get('pre_seconds',2),'finish':now+config.get('post_seconds',2),'deadline':now+config.get('max_collection_seconds',15),'weight':weight,'sources':{source},'candidates':[]}
-        capture.high_resolution(True)
+        set_high(True)
     def spool_event(event):
         # Crash-safe laptop queue: write once per event, not every frame.
         if len(list(spool.glob('*.json'))) >= 1000:
@@ -133,7 +140,7 @@ def run(args):
                 wall=time.time()
                 event=DeviceEvent(event_id=collector['id'],event_type='INTERACTION',device_id='vision-1',boot_id=boot,sequence_number=seq,tray_id=tray,capture_start=f.capture_wall-config.get('pre_seconds',2) if f and f.capture_wall else wall-4,capture_end=f.capture_wall if f and f.capture_wall else wall,monotonic_ms=int(now*1000),clock_synced=bool(f and sensor and sensor.clock_synced),clock_uncertainty_ms=max(f.clock_uncertainty_ms if f else 9999,sensor.clock_uncertainty_ms if sensor else 9999),calibration_version=sensor.calibration_version if sensor else 'UNSET',weight=weight,candidates=candidates,evidence_refs=refs,model_status=detectors[tray].status,sensor_health=Health(ok=not camera_failed and bool(sensor and sensor.sensor_health.ok),flags=flags+(['CAMERA_FAILURE'] if camera_failed else [])+(sensor.sensor_health.flags if sensor else ['NO_MATCHING_WEIGHT']),queue_overflow=overflow[0]),frame_age_ms=max(0,(wall-f.capture_wall)*1000) if f and f.capture_wall else 9999,frame_gap_ms=last_gap,blur=blur)
                 spool_event(event);del active[tray]
-            if not active and args.mode=='B':capture.high_resolution(False)
+            if not active:set_high(False)
             if now-last_heartbeat>10:
                 seq+=1;wall=time.time();spool_event(DeviceEvent(event_id=uuid.uuid4().hex,event_type='HEALTH',device_id='vision-1',boot_id=boot,sequence_number=seq,capture_start=wall,capture_end=wall,monotonic_ms=int(now*1000),clock_synced=False,clock_uncertainty_ms=9999,calibration_version='UNSET',sensor_health=Health(ok=not camera_failed,flags=['CAMERA_FAILURE'] if camera_failed else [],queue_overflow=overflow[0])))
                 last_heartbeat=now

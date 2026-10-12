@@ -253,7 +253,10 @@ def ingest(event: DeviceEvent):
         row = SensorEvent(id=event.event_id, device_id=event.device_id, boot_id=event.boot_id, sequence_number=event.sequence_number, payload=event.model_dump())
         db.add(row)
         db.flush()
-        late = device.boot_id == event.boot_id and event.sequence_number <= device.max_sequence
+        # HEALTH is published live (best effort) while durable events drain from the
+        # device flash queue later, so HEALTH must not advance the ordering watermark.
+        ordered = event.event_type != "HEALTH"
+        late = ordered and device.boot_id == event.boot_id and event.sequence_number <= device.max_sequence
         stale = time.time() - event.capture_end > 5 or event.capture_end > time.time() + 1
         if device.boot_id != event.boot_id:
             # Old boot replay is accepted durably but never automatically charged.
@@ -261,7 +264,7 @@ def ingest(event: DeviceEvent):
             late = bool(old_boot)
             if not late:
                 device.boot_id, device.max_sequence = event.boot_id, -1
-        if not late:
+        if ordered and not late:
             device.max_sequence = max(device.max_sequence, event.sequence_number)
         device.last_seen, device.health = time.time(), event.sensor_health.model_dump()
         if event.event_type == "BARRIER":

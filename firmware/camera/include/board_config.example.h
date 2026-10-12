@@ -1,6 +1,9 @@
 #pragma once
 // DO NOT guess these pins from AI-Thinker OV2640 examples.
 // Copy to board_config.h ONLY after verifying carrier schematic and module part numbers.
+// For an ESP32-CAM-layout carrier: run env esp32cam-pinmap-probe; only PROBE_PASS pid=0x3660 allows
+// board_config.h to define BOARD_CONFIRMED and include "candidates/ai_thinker_layout.h".
+// See docs/programming-camera.md stage 8.
 // #define BOARD_CONFIRMED 1
 // #define CAM_D0 ...
 // #define CAM_D1 ...

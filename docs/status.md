@@ -1,18 +1,21 @@
-# Implementation and validation status — 9–10 October 2026
+# Implementation and validation status — 9–10 October 2026 (audited 12 October 2026)
+
+Audit of 12 October: see [audit-2026-10-12.md](audit-2026-10-12.md) for the requirement matrix, fixed defects (flush-barrier ordering, queue order, Mode B switching) and open items. Suite now **68 passed**. New camera environments `esp32cam-identify` and `esp32cam-pinmap-probe` compile; the camera pin map is a candidate until the probe reports `PROBE_PASS pid=0x3660` on the physical board.
 
 ## Verified software
 
 | Deliverable | Result |
 |---|---|
 | Shopping flow | HTTP and browser QR → simulated UID/release binding → pickup → live cart → same-tray return → simulated payment → receipt |
-| Automated suite | **66 passed**, one test-client deprecation warning; SQLite test database, no hardware |
+| Automated suite | **68 passed** (12 Oct audit; was 66), one test-client deprecation warning; SQLite test database, no hardware |
 | Apps | TypeScript checks and customer/staff Vite production builds passed; npm audit reported zero vulnerabilities |
 | Migrations | Fresh upgrade/seed, downgrade, re-upgrade and ORM/schema comparison passed on SQLite |
 | Sensor controller | Compiled `devkitc-v4-proposed`; RAM 45,728 bytes, flash 855,077 bytes |
 | Gate controller | Compiled `devkitc-v4-demo`; RAM 45,676 bytes, flash 857,541 bytes |
 | Camera diagnostic | Compiled; deliberately drives no camera pins |
 | Camera API check | Configured capture handlers compile against SDK with disabled sentinel pins and no hardware startup |
-| UART programmer | Compiled WROOM-32 USB/UART2 pass-through at fixed 115200 baud; not physically tested |
+| UART programmer | Compiled WROOM-32 USB/UART2 pass-through at fixed 115200 baud; hardware pass-through (EN held low) documented as the recommended method; not physically tested |
+| Camera identify / pin-map probe | `esp32cam-identify` and `esp32cam-pinmap-probe` compiled; upload command verified as 115200 baud, `no_reset`/`no_reset` |
 | Marker/dataset tools | ArUco generation/decode, split leakage checks, annotation validation, missing-model guards and metric null denominators tested |
 
 Tests cover QR expiry/replay, wrong UID/jam/uncertain release, duplicate dispensing, manual recovery/cancellation, cleaning/reuse, pickups/returns, restock isolation, quantity ambiguity, same/different-tray concurrency, unproven co-visibility, crossed/hidden/opposite-hand/handoff vetoes, equal-weight exchange, missing camera/blur/stale/gaps, weight drift/disconnect/stuck/overload, duplicate/out-of-order/reboot/offline events, cart reconnect/atomic versions, payment timeout/retry, late corrections, historical bracelet bindings, exclusive sensor allocation, capture timestamp/boot checks, authorization, retention and flush checkpoint scope.

@@ -11,6 +11,39 @@
 #else
 #include "../../common/Secrets.example.h"
 #endif
+#if defined(CAMERA_IDENTIFY)
+// Hardware identification only. No camera pins configured, no Wi-Fi radio started.
+void setup(){Serial.begin(115200);}
+void loop(){
+  uint8_t mac[6];esp_efuse_mac_get_default(mac);
+  Serial.printf("IDENTIFY chip=%s rev=%d cores=%d cpu_mhz=%d flash_bytes=%u psram_bytes=%u heap_free=%u mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+    ESP.getChipModel(),ESP.getChipRevision(),ESP.getChipCores(),ESP.getCpuFreqMHz(),ESP.getFlashChipSize(),
+    psramFound()?ESP.getPsramSize():0,ESP.getFreeHeap(),mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+  delay(2000);
+}
+#elif defined(CAMERA_PINMAP_PROBE)
+#include "candidates/ai_thinker_layout.h"
+// One-shot verification of the CANDIDATE map. Remove the IO0-GND jumper first: GPIO0 is XCLK here.
+String result="PROBE_NOT_RUN";
+void probe(){
+  if(!psramFound()){result="PROBE_FAIL no PSRAM detected (carrier is not the expected ESP32-CAM layout or PSRAM failed)";return;}
+  camera_config_t c={};c.ledc_channel=LEDC_CHANNEL_0;c.ledc_timer=LEDC_TIMER_0;
+  c.pin_d0=CAM_D0;c.pin_d1=CAM_D1;c.pin_d2=CAM_D2;c.pin_d3=CAM_D3;c.pin_d4=CAM_D4;c.pin_d5=CAM_D5;c.pin_d6=CAM_D6;c.pin_d7=CAM_D7;
+  c.pin_xclk=CAM_XCLK;c.pin_pclk=CAM_PCLK;c.pin_vsync=CAM_VSYNC;c.pin_href=CAM_HREF;c.pin_sccb_sda=CAM_SDA;c.pin_sccb_scl=CAM_SCL;c.pin_pwdn=CAM_PWDN;c.pin_reset=CAM_RESET;
+  c.xclk_freq_hz=20000000;c.pixel_format=PIXFORMAT_JPEG;c.frame_size=FRAMESIZE_QVGA;c.jpeg_quality=12;c.fb_count=1;c.fb_location=CAMERA_FB_IN_PSRAM;c.grab_mode=CAMERA_GRAB_LATEST;
+  esp_err_t err=esp_camera_init(&c);
+  if(err!=ESP_OK){result="PROBE_FAIL esp_camera_init error 0x"+String(err,HEX)+" (no sensor answered on candidate SCCB pins, or ribbon not seated)";return;}
+  sensor_t* s=esp_camera_sensor_get();uint16_t pid=s?s->id.PID:0;
+  if(pid!=OV3660_PID){result="PROBE_FAIL sensor PID 0x"+String(pid,HEX)+" is not OV3660 (0x3660)";esp_camera_deinit();return;}
+  camera_fb_t* fb=nullptr;for(int i=0;i<3&&!fb;i++){fb=esp_camera_fb_get();if(!fb)delay(100);}
+  if(!fb){result="PROBE_FAIL OV3660 answered but no frame arrived (data/VSYNC/HREF/PCLK pins do not match)";esp_camera_deinit();return;}
+  bool jpeg=fb->len>4&&fb->buf[0]==0xFF&&fb->buf[1]==0xD8;
+  result=String(jpeg?"PROBE_PASS":"PROBE_FAIL")+" pid=0x"+String(pid,HEX)+" frame="+String(fb->width)+"x"+String(fb->height)+" bytes="+String(fb->len)+(jpeg?" jpeg_soi=ok":" jpeg_soi=missing")+" psram_bytes="+String(ESP.getPsramSize());
+  esp_camera_fb_return(fb);esp_camera_deinit();
+}
+void setup(){Serial.begin(115200);delay(500);probe();}
+void loop(){Serial.println(result);delay(2000);}
+#else
 #if __has_include("board_config.h")
 #include "board_config.h"
 #endif
@@ -38,7 +71,10 @@ void configureCarrier(){
     server.setContentLength(fb->len);server.send(200,"image/jpeg","");server.client().setTimeout(2);server.client().write(fb->buf,fb->len);esp_camera_fb_return(fb);yield();});
   server.begin();
 }
-void serviceCarrier(){server.handleClient();uint32_t now=millis();if(WiFi.status()!=WL_CONNECTED&&(int32_t)(now-nextRetry)>=0){WiFi.reconnect();nextRetry=now+backoff;backoff=min(backoff*2,(uint32_t)30000);}else if(WiFi.status()==WL_CONNECTED)backoff=1000;delay(1);}
+bool announced=false;
+void serviceCarrier(){server.handleClient();uint32_t now=millis();
+  if(WiFi.status()==WL_CONNECTED&&!announced){announced=true;Serial.println("WIFI_CONNECTED ip="+WiFi.localIP().toString()+" rssi="+String(WiFi.RSSI())+" ov3660="+(healthy?"ok":"FAILED"));}else if(WiFi.status()!=WL_CONNECTED&&announced){announced=false;Serial.println("WIFI_LOST reconnecting with backoff");}
+  if(WiFi.status()!=WL_CONNECTED&&(int32_t)(now-nextRetry)>=0){WiFi.reconnect();nextRetry=now+backoff;backoff=min(backoff*2,(uint32_t)30000);}else if(WiFi.status()==WL_CONNECTED)backoff=1000;delay(1);}
 void setup(){
 #ifdef CAMERA_API_CHECK
   Serial.begin(115200);Serial.println("Camera API compile check only. No pins assigned or driven.");
@@ -53,4 +89,5 @@ void loop(){
   serviceCarrier();
 #endif
 }
+#endif
 #endif

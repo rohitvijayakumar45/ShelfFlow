@@ -157,3 +157,22 @@ def test_cancel_uncertain_gate_requires_recovered_matching_uid():
         assert c.post('/staff/gates/jam/cancel',headers=headers,json=body).status_code==200
     with SessionLocal() as db:
         assert db.get(Bracelet,'B01').session_id is None and db.get(ShoppingSession,sid).status=='CANCELLED'
+
+def test_best_effort_health_does_not_make_queued_barrier_late():
+    # Firmware publishes HEALTH live but sends BARRIER from its flash queue afterwards.
+    sid,m,_=enter()
+    with s.transaction() as db:
+        b=FlushBarrier(session_id=sid,device_id='sensor-1',requested=time.time()-1);db.add(b);db.flush();id_=b.id
+    barrier=interaction(marker=m,sequence=5);barrier.event_type='BARRIER';barrier.evidence_refs=['BARRIER:'+id_];barrier.device_id='sensor-1';barrier.candidates=[]
+    health=interaction(marker=m,sequence=6);health.event_type='HEALTH';health.device_id='sensor-1';health.candidates=[]
+    s.ingest(health);s.ingest(barrier)
+    with SessionLocal() as db:assert db.get(FlushBarrier,id_).acknowledged_event==barrier.event_id
+
+def test_durable_event_ordering_still_rejects_older_barrier():
+    sid,m,_=enter()
+    with s.transaction() as db:
+        b=FlushBarrier(session_id=sid,device_id='sensor-1',requested=time.time()-1);db.add(b);db.flush();id_=b.id
+    weight=interaction(marker=m,sequence=6);weight.event_type='WEIGHT';weight.device_id='sensor-1';weight.candidates=[]
+    barrier=interaction(marker=m,sequence=5);barrier.event_type='BARRIER';barrier.evidence_refs=['BARRIER:'+id_];barrier.device_id='sensor-1';barrier.candidates=[]
+    s.ingest(weight);s.ingest(barrier)
+    with SessionLocal() as db:assert db.get(FlushBarrier,id_).acknowledged_event is None

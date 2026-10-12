@@ -55,8 +55,10 @@ class DeviceBus {
     mqtt.loop();
     if(command.length()==0&&!incomingCommands.empty()){command=incomingCommands.front();incomingCommands.pop_front();}
     if(storageOK&&mqtt.connected()&&now-lastPublish>=500){
-      lastPublish=now;File root=LittleFS.open("/");File f=root.openNextFile();
-      while(f){String name=f.name();if(name.endsWith(".json")){String data=f.readString();mqtt.publish(topic("events").c_str(),data.c_str());break;}f=root.openNextFile();}
+      // Send the oldest queued sequence first. LittleFS name order is lexicographic ("-10" before "-9").
+      lastPublish=now;File root=LittleFS.open("/");File f=root.openNextFile();String oldest="";long oldestSeq=-1;
+      while(f){String name=f.name();if(name.endsWith(".json")){long s=name.substring(name.lastIndexOf('-')+1,name.length()-5).toInt();if(oldestSeq<0||s<oldestSeq){oldestSeq=s;oldest=name;}}f=root.openNextFile();}
+      if(oldest.length()){File queued=LittleFS.open(("/"+oldest).c_str(),"r");if(queued){String data=queued.readString();queued.close();mqtt.publish(topic("events").c_str(),data.c_str());}}
     }
   }
   void envelope(JsonDocument& d,const char* type,const char* tray,const char* calibration){
