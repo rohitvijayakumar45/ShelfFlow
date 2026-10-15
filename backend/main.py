@@ -118,7 +118,12 @@ def vision_bindings(x_device_key: str = Header()):
 def vision_config(x_device_key: str = Header()):
     device_auth("vision-1",x_device_key)
     with SessionLocal() as db:
-        return {"trays":{t.id:{"roi":t.roi,"product_id":t.product_id,"calibration_version":t.calibration_version} for t in db.scalars(select(Tray))}}
+        trays={}
+        for t in db.scalars(select(Tray)):
+            on_tray=[] if not t.unit_tracking else svc.unit_pools(db,t.id)[0]
+            trays[t.id]={"roi":t.roi,"product_id":None if t.unit_tracking else t.product_id,"calibration_version":t.calibration_version,
+                         "unit_tracking":t.unit_tracking,"units_on_tray":[{"id":u["id"],"product_id":u["product_id"],"spot":u["spot"]} for u in on_tray]}
+        return {"trays":trays}
 
 class Checkout(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=100)
@@ -181,7 +186,7 @@ def serialize(obj):
 def state(user=Depends(staff)):
     with SessionLocal() as db:
         result = {}
-        for name, model in [("products", Product), ("trays", Tray), ("bracelets", Bracelet), ("devices", Device), ("sessions", ShoppingSession), ("gates", GateTransaction), ("hypotheses", Hypothesis), ("receipts", Receipt), ("shelves", Shelf), ("barriers", FlushBarrier)]:
+        for name, model in [("products", Product), ("trays", Tray), ("bracelets", Bracelet), ("devices", Device), ("sessions", ShoppingSession), ("gates", GateTransaction), ("hypotheses", Hypothesis), ("receipts", Receipt), ("shelves", Shelf), ("barriers", FlushBarrier), ("tray_units", TrayUnit), ("tray_loads", TrayLoad)]:
             result[name] = [serialize(o) for o in db.scalars(select(model))]
         for d in result["devices"]:
             del d["secret_digest"]
@@ -231,6 +236,7 @@ class Review(Reason):
     decision: Literal["CONFIRM", "DISMISS"]
     session_id: str | None = None
     quantity: int = Field(default=1, ge=1, le=10)
+    unit_ids: list[str] | None = Field(default=None, max_length=10)
 
 @app.post("/staff/review/{hypothesis_id}")
 def review(hypothesis_id: str, body: Review, user=Depends(staff)):
@@ -243,6 +249,7 @@ class CorrectionBody(Reason):
     quantity_delta: int = Field(ge=-10, le=10)
     inventory_delta: int = Field(ge=-10, le=10)
     idempotency_key: str
+    unit_ids: list[str] | None = Field(default=None, max_length=10)
 
 @app.post("/staff/corrections/{hypothesis_id}")
 def correction(hypothesis_id: str, body: CorrectionBody, user=Depends(staff)):
@@ -416,6 +423,56 @@ def tray_setup(tray_id: str, body: TraySetup, user=Depends(staff)):
         db.add(TrayAssignment(tray_id=tray.id,product_id=tray.product_id))
         svc.audit(db, "staff", "TRAY_SETUP", {"tray_id": tray.id, **body.model_dump()})
     return {"ok": True}
+
+class UnitTracking(Reason):
+    enabled: bool
+
+@app.post("/staff/trays/{tray_id}/unit-tracking")
+def unit_tracking(tray_id: str, body: UnitTracking, user=Depends(staff)):
+    return svc.set_unit_tracking(tray_id, body.enabled, body.reason, user["sub"])
+
+@app.post("/staff/trays/{tray_id}/loads")
+def open_load(tray_id: str, body: Reason, user=Depends(staff)):
+    return svc.open_load(tray_id, body.reason, user["sub"])
+
+class LoadUnit(StrictModel):
+    product_id: str
+    weight_event_id: str
+    spot: int | None = Field(default=None, ge=0, le=31)
+    crop_refs: list[str] = Field(default_factory=list, max_length=50)
+
+@app.post("/staff/loads/{load_id}/units")
+def load_unit(load_id: str, body: LoadUnit, user=Depends(staff)):
+    return svc.add_unit(load_id, body.product_id, body.weight_event_id, body.spot, body.crop_refs, user["sub"])
+
+@app.post("/staff/loads/{load_id}/close")
+def close_load(load_id: str, user=Depends(staff)):
+    return svc.close_load(load_id, user["sub"])
+
+@app.post("/staff/units/{unit_id}/remove")
+def remove_unit(unit_id: str, body: Reason, user=Depends(staff)):
+    return svc.remove_unit(unit_id, body.reason, user["sub"])
+
+@app.get("/staff/trays/{tray_id}/units")
+def tray_units(tray_id: str, user=Depends(staff)):
+    with SessionLocal() as db:
+        svc.get(db, Tray, tray_id)
+        return [serialize(u) for u in db.scalars(select(TrayUnit).where(TrayUnit.tray_id == tray_id).order_by(TrayUnit.created))]
+
+@app.get("/staff/trays/{tray_id}/weight-events")
+def recent_weight_events(tray_id: str, since: float = 0, user=Depends(staff)):
+    """Settled weight changes not yet used, newest first: the loading wizard picks the one after each placement."""
+    with SessionLocal() as db:
+        svc.get(db, Tray, tray_id)
+        rows = db.scalars(select(SensorEvent).where(SensorEvent.payload['event_type'].as_string() == 'WEIGHT', SensorEvent.payload['tray_id'].as_string() == tray_id).order_by(SensorEvent.received.desc()).limit(50))
+        out = []
+        for e in rows:
+            w = e.payload.get('weight') or {}
+            if e.payload['capture_end'] < since or db.get(SensorClaim, e.id) or not w.get('settled'):
+                continue
+            out.append({"event_id": e.id, "delta_g": round(w['post_g'] - w['pre_g'], 2), "noise_g": w.get('noise_g'),
+                        "capture_end": e.payload['capture_end'], "calibration_version": e.payload['calibration_version'], "sensor_health": e.payload['sensor_health']})
+        return out
 
 class Calibrate(Reason):
     zero_raw: float

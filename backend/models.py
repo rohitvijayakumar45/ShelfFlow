@@ -93,6 +93,36 @@ class Tray(Base):
     stock: Mapped[int] = mapped_column(Integer, default=0)
     calibration_version: Mapped[str] = mapped_column(String, default="UNSET")
     roi: Mapped[list] = mapped_column(JSON, default=list)
+    # True: mixed-product tray tracked per physical unit (tray_units); product_id is then ignored
+    # and stock always equals the number of ON_TRAY units.
+    unit_tracking: Mapped[bool] = mapped_column(Boolean, default=False)
+
+class TrayLoad(Base):
+    __tablename__ = "tray_loads"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    tray_id: Mapped[str] = mapped_column(ForeignKey("trays.id"))
+    actor: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="OPEN")
+    started: Mapped[float] = mapped_column(Float, default=time.time)
+    ended: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+class TrayUnit(Base):
+    """One physical item, weighed individually from a stable tray weight event when loaded."""
+    __tablename__ = "tray_units"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    tray_id: Mapped[str] = mapped_column(ForeignKey("trays.id"))
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    load_id: Mapped[str] = mapped_column(ForeignKey("tray_loads.id"))
+    source_event_id: Mapped[str] = mapped_column(ForeignKey("sensor_events.id"), unique=True)
+    weight_g: Mapped[float] = mapped_column(Float)
+    noise_g: Mapped[float] = mapped_column(Float)
+    spot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crop_refs: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String, default="ON_TRAY")  # ON_TRAY | IN_CART | REMOVED
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("shopping_sessions.id"), nullable=True)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    updated: Mapped[float] = mapped_column(Float, default=time.time)
 
 class Calibration(Base):
     __tablename__ = "calibrations"

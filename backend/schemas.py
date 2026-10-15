@@ -37,6 +37,8 @@ class Candidate(StrictModel):
     crossed: bool = False
     occluded: bool = False
     detector_confidence: float = Field(default=0, ge=0, le=1)
+    # Unit-tracked trays: tray spot that the camera saw emptied (pickup) or filled (return).
+    spot: int | None = Field(default=None, ge=0, le=31)
     chain_refs: list[str] = Field(default_factory=list, max_length=30)
 
 class DeviceEvent(StrictModel):

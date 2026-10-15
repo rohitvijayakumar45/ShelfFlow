@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from backend.db import SessionLocal
 from backend.models import *
 from backend.config import MODE
-from backend.fusion import evaluate
+from backend.fusion import evaluate, evaluate_units, unit_tolerance
 from backend.schemas import DeviceEvent
 
 _local_lock = threading.RLock()
@@ -154,7 +154,7 @@ def cart(db, session_id):
             "confirmed_events": [{"id":h.id,"action":h.proposal.get("action"),"product_id":h.proposal.get("product_id"),"quantity":h.proposal.get("quantity")} for h in confirmed],
             "corrections": [{"id":c.id,**c.detail} for c in corrections]}
 
-def correct(hypothesis_id, session_id, product_id, quantity_delta, inventory_delta, reason, key, actor):
+def correct(hypothesis_id, session_id, product_id, quantity_delta, inventory_delta, reason, key, actor, unit_ids=None):
     with transaction() as db:
         old = db.get(Correction,key)
         if old:
@@ -170,7 +170,9 @@ def correct(hypothesis_id, session_id, product_id, quantity_delta, inventory_del
         if quantity_delta>0:
             claim_sources(db,h.event_id,h.tray_id)
         p=get(db,Product,product_id);tray=get(db,Tray,h.tray_id)
-        if p.id!=tray.product_id:
+        if tray.unit_tracking:
+            correct_units(db,tray,p,session_id,quantity_delta,inventory_delta,unit_ids or [])
+        elif p.id!=tray.product_id:
             fail("Correction SKU mismatch")
         item=db.scalar(select(CartItem).where(CartItem.session_id==session_id,CartItem.product_id==p.id))
         if quantity_delta<0 and (not item or item.quantity < -quantity_delta):
@@ -217,14 +219,16 @@ def apply_proposal(db, h, proposal, reviewed=False):
         fail("Closed/non-active session requires audited correction")
     tray = get(db, Tray, h.tray_id)
     p = get(db, Product, proposal["product_id"])
-    if p.id != tray.product_id:
+    if not tray.unit_tracking and p.id != tray.product_id:
         fail("Tray SKU mismatch")
     claim_sources(db,h.event_id,h.tray_id)
     q = proposal["quantity"]
     delta = q if proposal["action"] == "PICKUP" else -q
     item = db.scalar(select(CartItem).where(CartItem.session_id == s.id, CartItem.product_id == p.id))
-    if delta < 0 and (not item or item.quantity < q or item.tray_id != tray.id):
+    if delta < 0 and (not item or item.quantity < q or (not tray.unit_tracking and item.tray_id != tray.id)):
         fail("Return has no matching same-tray cart quantity")
+    if tray.unit_tracking:
+        move_units(db, tray, s, p, proposal)
     if delta > 0 and tray.stock < q:
         fail("Insufficient tray stock")
     if not item:
@@ -284,7 +288,11 @@ def ingest(event: DeviceEvent):
                         bindings[m]=(None,'CONFLICTING_BINDING_INTERVAL')
                     else:
                         bindings[m] = (b.session_id, b.rfid)
-            veto, proposals, scores = evaluate(event, product, bindings, MODE == "simulation")
+            if tray.unit_tracking:
+                on_tray, in_cart = unit_pools(db, tray.id)
+                veto, proposals, scores = evaluate_units(event, on_tray, in_cart, bindings, MODE == "simulation")
+            else:
+                veto, proposals, scores = evaluate(event, product, bindings, MODE == "simulation")
             source_reasons,_=source_vetoes(db,row.id,tray.id)
             veto.extend(source_reasons)
             if late or stale:
@@ -306,8 +314,9 @@ def ingest(event: DeviceEvent):
                 net_by_session[sid] = net_by_session.get(sid, 0) + delta
                 total_delta += delta
                 if delta < 0:
-                    item = db.scalar(select(CartItem).where(CartItem.session_id == sid, CartItem.product_id == product.id))
-                    if not item or item.quantity < -delta or item.tray_id != tray.id:
+                    pid = proposal.get("product_id") if tray.unit_tracking else product.id
+                    item = db.scalar(select(CartItem).where(CartItem.session_id == sid, CartItem.product_id == pid))
+                    if not item or item.quantity < -delta or (not tray.unit_tracking and item.tray_id != tray.id):
                         veto.append("RETURN_WITHOUT_MATCHING_CART")
             if total_delta > tray.stock:
                 veto.append("INSUFFICIENT_STOCK")
@@ -329,7 +338,7 @@ def ingest(event: DeviceEvent):
         emit(db, f"shelfflow/devices/{device.id}/acks", {"event_id": event.event_id, "boot_id": event.boot_id, "sequence_number": event.sequence_number, "durable": True})
         return {"ack": event.event_id, "durable": True, "duplicate": False}
 
-def review(hid, decision, session_id, quantity, reason, actor):
+def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
     if not reason.strip():
         fail("Review reason required")
     with transaction() as db:
@@ -342,10 +351,16 @@ def review(hid, decision, session_id, quantity, reason, actor):
             proposal = {**h.proposal, "session_id": session_id, "quantity": quantity}
             if "action" not in proposal:
                 fail("No observed action to confirm; use reconciliation correction")
+            if unit_ids is not None:
+                # Staff name the physical units (e.g. choosing between weight alternatives).
+                products = {get(db, TrayUnit, i).product_id for i in unit_ids}
+                if len(products) != 1:
+                    fail("Confirm one product per decision; split mixed units into separate corrections")
+                proposal.update(unit_ids=list(unit_ids), product_id=products.pop(), quantity=len(unit_ids))
             apply_proposal(db, h, proposal, reviewed=True)
         else:
             h.status = "DISMISSED"
-        db.add(ReviewDecision(hypothesis_id=h.id, actor=actor, decision={"decision": decision, "session_id": session_id, "quantity": quantity, "reason": reason}))
+        db.add(ReviewDecision(hypothesis_id=h.id, actor=actor, decision={"decision": decision, "session_id": session_id, "quantity": quantity, "reason": reason, "unit_ids": unit_ids}))
         audit(db, actor, "REVIEW", {"hypothesis_id": h.id, "decision": decision, "reason": reason})
 
 def checkout(session_id, key, outcome, assisted, reason, actor):
@@ -384,3 +399,168 @@ def checkout(session_id, key, outcome, assisted, reason, actor):
         audit(db, actor, "SIMULATED_PAYMENT", {"session_id": session_id, "outcome": outcome, "assisted": assisted, "reason": reason})
         emit(db, f"cart/{s.id}", {"version": s.cart_version, "status": s.status})
         return {"payment_id": key, "state": outcome, "order_id": order.id}
+
+
+# ---------------------------------------------------------------------------
+# Unit-tracked (mixed-product) trays: staff loading, unit pools and unit moves.
+# A unit's weight always comes from a real, settled, healthy tray WEIGHT event
+# recorded during an open loading session. That event is claimed, so it can
+# never also be counted as a customer pickup or return.
+# ---------------------------------------------------------------------------
+
+def unit_dict(u):
+    return {"id": u.id, "product_id": u.product_id, "weight_g": u.weight_g, "noise_g": u.noise_g, "spot": u.spot}
+
+def unit_pools(db, tray_id):
+    units = list(db.scalars(select(TrayUnit).where(TrayUnit.tray_id == tray_id, TrayUnit.status.in_(["ON_TRAY", "IN_CART"])).order_by(TrayUnit.created)))
+    on_tray = [unit_dict(u) for u in units if u.status == "ON_TRAY"]
+    in_cart = {}
+    for u in units:
+        if u.status == "IN_CART":
+            in_cart.setdefault(u.session_id, []).append(unit_dict(u))
+    return on_tray, in_cart
+
+def sync_unit_stock(db, tray):
+    tray.stock = len(list(db.scalars(select(TrayUnit.id).where(TrayUnit.tray_id == tray.id, TrayUnit.status == "ON_TRAY"))))
+
+def move_units(db, tray, session, product, proposal):
+    ids = list(proposal.get("unit_ids") or [])
+    if len(ids) != proposal["quantity"] or len(set(ids)) != len(ids):
+        fail("Unit-tracked tray requires the exact physical units for this quantity")
+    for unit_id in ids:
+        u = get(db, TrayUnit, unit_id)
+        if u.tray_id != tray.id or u.product_id != product.id:
+            fail("Unit does not belong to this tray and product")
+        if proposal["action"] == "PICKUP":
+            if u.status != "ON_TRAY":
+                fail("Unit is not on the tray")
+            u.status, u.session_id = "IN_CART", session.id
+        else:
+            if u.status != "IN_CART" or u.session_id != session.id:
+                fail("Returned unit is not in this cart")
+            u.status, u.session_id, u.spot = "ON_TRAY", None, None  # returned spot is unknown until re-observed
+        u.updated = time.time()
+
+# (quantity sign, inventory sign) -> (allowed current statuses, new status)
+_CORRECTION_MOVES = {
+    (1, -1): (("ON_TRAY",), "IN_CART"),     # missed pickup: charge it, unit left the tray
+    (1, 0): (("REMOVED",), "IN_CART"),      # unit already off the tray is charged
+    (-1, 1): (("IN_CART",), "ON_TRAY"),     # refund, unit is physically back
+    (-1, 0): (("IN_CART",), "REMOVED"),     # refund, unit not back on the tray
+    (0, -1): (("ON_TRAY",), "REMOVED"),
+    (0, 1): (("REMOVED",), "ON_TRAY"),
+}
+
+def correct_units(db, tray, product, session_id, quantity_delta, inventory_delta, unit_ids):
+    sign = lambda v: (v > 0) - (v < 0)
+    if not quantity_delta and not inventory_delta:
+        return
+    if (quantity_delta and inventory_delta and abs(quantity_delta) != abs(inventory_delta)) or sign(quantity_delta) == sign(inventory_delta):
+        fail("Unit-tracked correction needs matching cart and inventory magnitudes")
+    count = max(abs(quantity_delta), abs(inventory_delta))
+    if len(unit_ids) != count or len(set(unit_ids)) != count:
+        fail("Unit-tracked correction must name each physical unit")
+    allowed, new = _CORRECTION_MOVES[(sign(quantity_delta), sign(inventory_delta))]
+    for unit_id in unit_ids:
+        u = get(db, TrayUnit, unit_id)
+        if u.tray_id != tray.id or u.product_id != product.id or u.status not in allowed:
+            fail("Unit state does not allow this correction")
+        if u.status == "IN_CART" and u.session_id != session_id:
+            fail("Unit belongs to another cart")
+        u.status, u.session_id, u.updated = new, (session_id if new == "IN_CART" else None), time.time()
+
+def set_unit_tracking(tray_id, enabled, reason, actor):
+    with transaction() as db:
+        tray = get(db, Tray, tray_id)
+        active = db.scalar(select(TrayUnit).where(TrayUnit.tray_id == tray.id, TrayUnit.status.in_(["ON_TRAY", "IN_CART"])))
+        if tray.stock or active or db.scalar(select(TrayLoad).where(TrayLoad.tray_id == tray.id, TrayLoad.status == "OPEN")):
+            fail("Empty and reconcile the tray before changing its tracking mode")
+        tray.unit_tracking = enabled
+        audit(db, actor, "TRAY_UNIT_TRACKING", {"tray_id": tray.id, "enabled": enabled, "reason": reason})
+        return {"tray_id": tray.id, "unit_tracking": enabled}
+
+def open_load(tray_id, reason, actor):
+    with transaction() as db:
+        tray = get(db, Tray, tray_id)
+        if not tray.unit_tracking:
+            fail("Enable unit tracking on this tray first")
+        if db.scalar(select(TrayLoad).where(TrayLoad.tray_id == tray.id, TrayLoad.status == "OPEN")):
+            fail("A loading session is already open for this tray")
+        load = TrayLoad(tray_id=tray.id, actor=actor, reason=reason)
+        db.add(load)
+        db.flush()
+        audit(db, actor, "TRAY_LOAD_OPEN", {"load_id": load.id, "tray_id": tray.id, "reason": reason})
+        return {"load_id": load.id, "tray_id": tray.id, "started": load.started}
+
+def add_unit(load_id, product_id, weight_event_id, spot, crop_refs, actor):
+    with transaction() as db:
+        load = get(db, TrayLoad, load_id)
+        if load.status != "OPEN":
+            fail("Loading session is closed")
+        tray, product = get(db, Tray, load.tray_id), get(db, Product, product_id)
+        event = get(db, SensorEvent, weight_event_id)
+        e = event.payload
+        w = e.get("weight") or {}
+        health = e.get("sensor_health") or {}
+        if e["event_type"] != "WEIGHT" or e["tray_id"] != tray.id:
+            fail("Unit weight must come from this tray's WEIGHT event")
+        if not w.get("settled") or not health.get("ok", False) or health.get("flags") or health.get("queue_overflow"):
+            fail("Weight event is unsettled or the sensor is unhealthy")
+        if e["calibration_version"] != tray.calibration_version or tray.calibration_version == "UNSET":
+            fail("Weight event calibration does not match the tray's current calibration")
+        if e["capture_end"] < load.started:
+            fail("Weight event predates this loading session")
+        delta = w["post_g"] - w["pre_g"]
+        noise = float(w.get("noise_g") or 0)
+        if delta <= 3 * noise + 1.0:
+            fail("Weight increase is not distinguishable from noise; place one item and wait until stable")
+        if db.get(SensorClaim, event.id) or db.scalar(select(TrayUnit).where(TrayUnit.source_event_id == event.id)):
+            fail("Weight event already used")
+        if spot is not None and db.scalar(select(TrayUnit).where(TrayUnit.tray_id == tray.id, TrayUnit.status == "ON_TRAY", TrayUnit.spot == spot)):
+            fail("Another unit already occupies that spot")
+        unit = TrayUnit(tray_id=tray.id, product_id=product.id, load_id=load.id, source_event_id=event.id,
+                        weight_g=delta, noise_g=noise, spot=spot, crop_refs=list(crop_refs))
+        db.add(unit)
+        db.add(SensorClaim(source_event_id=event.id, interaction_event_id=event.id))
+        db.flush()
+        # Warn when a different product on this tray could be confused with this one by weight alone.
+        warnings = []
+        for other in db.scalars(select(TrayUnit).where(TrayUnit.tray_id == tray.id, TrayUnit.status == "ON_TRAY", TrayUnit.product_id != product.id)):
+            if abs(other.weight_g - delta) <= 2 * unit_tolerance([unit_dict(other), unit_dict(unit)], noise):
+                warnings.append({"code": "WEIGHT_TOO_CLOSE", "product_id": other.product_id, "unit_id": other.id,
+                                 "difference_g": round(abs(other.weight_g - delta), 2)})
+        # The product's measured distribution is rebuilt from every individually weighed unit.
+        from statistics import mean, pstdev
+        samples = [u.weight_g for u in db.scalars(select(TrayUnit).where(TrayUnit.product_id == product.id))]
+        product.unit_g = mean(samples)
+        product.tolerance_g = max(3 * pstdev(samples), 1.0) if len(samples) > 1 else max(3 * noise, 1.0)
+        product.weight_source = "MEASURED"
+        product.weight_distribution = {"source": "TRAY_UNITS", "samples_g": samples, "count": len(samples), "mean_g": product.unit_g,
+                                       "std_g": pstdev(samples), "min_g": min(samples), "max_g": max(samples)}
+        sync_unit_stock(db, tray)
+        db.add(InventoryMovement(tray_id=tray.id, delta=1, reason="LOAD", reference=unit.id))
+        audit(db, actor, "TRAY_UNIT_LOADED", {"unit_id": unit.id, "load_id": load.id, "tray_id": tray.id, "product_id": product.id,
+                                              "weight_g": delta, "noise_g": noise, "spot": spot, "source_event_id": event.id, "warnings": warnings})
+        return {"unit_id": unit.id, "weight_g": round(delta, 2), "noise_g": noise, "warnings": warnings}
+
+def close_load(load_id, actor):
+    with transaction() as db:
+        load = get(db, TrayLoad, load_id)
+        if load.status != "OPEN":
+            fail("Loading session already closed")
+        load.status, load.ended = "CLOSED", time.time()
+        units = list(db.scalars(select(TrayUnit).where(TrayUnit.load_id == load.id)))
+        audit(db, actor, "TRAY_LOAD_CLOSE", {"load_id": load.id, "units": [u.id for u in units]})
+        return {"load_id": load.id, "units": len(units)}
+
+def remove_unit(unit_id, reason, actor):
+    with transaction() as db:
+        u = get(db, TrayUnit, unit_id)
+        if u.status != "ON_TRAY":
+            fail("Only units on the tray can be removed by staff; carts change through review or correction")
+        u.status, u.updated = "REMOVED", time.time()
+        tray = get(db, Tray, u.tray_id)
+        sync_unit_stock(db, tray)
+        db.add(InventoryMovement(tray_id=tray.id, delta=-1, reason="UNIT_REMOVED", reference=f"remove:{u.id}"))
+        audit(db, actor, "TRAY_UNIT_REMOVED", {"unit_id": u.id, "tray_id": tray.id, "reason": reason})
+        return {"unit_id": u.id, "status": u.status}
