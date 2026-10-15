@@ -32,8 +32,13 @@ class DeviceBus {
     storageOK=LittleFS.begin(false); // Never silently format away unacknowledged events.
     if(!storageOK)Serial.println("LittleFS missing. Initialize explicitly; evidence queue disabled.");
     if(storageOK){File root=LittleFS.open("/");File f=root.openNextFile();while(f){if(String(f.name()).endsWith(".tmp")){lost();Serial.println("Incomplete event after reboot: assisted reconciliation required");}f=root.openNextFile();}}
+#ifdef DEVICE_OFFLINE
+    WiFi.mode(WIFI_OFF); // Bench diagnosis only: isolates sensor wiring from Wi-Fi supply peaks.
+    Serial.println("DEVICE_OFFLINE build: Wi-Fi/MQTT disabled");
+#else
     WiFi.mode(WIFI_STA);WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
     configTime(0,0,"pool.ntp.org","time.nist.gov");
+#endif
     mqtt.setServer(MQTT_HOST,MQTT_PORT);mqtt.setBufferSize(4096);mqtt.setSocketTimeout(1);
     mqtt.setCallback([this](char* t,byte* payload,unsigned int len){
       JsonDocument doc;if(deserializeJson(doc,payload,len))return;
@@ -46,6 +51,9 @@ class DeviceBus {
   }
   void tick(){
     uint32_t now=millis();
+#ifdef DEVICE_OFFLINE
+    return;
+#endif
     if(WiFi.status()!=WL_CONNECTED){if((int32_t)(now-nextRetry)>=0){WiFi.reconnect();nextRetry=now+backoff;backoff=min(backoff*2,(uint32_t)30000);}return;}
     if(!mqtt.connected()&&(int32_t)(now-nextRetry)>=0){
       if(mqtt.connect((id+"-"+boot).c_str(),id.c_str(),MQTT_PASSWORD,topic("availability").c_str(),1,true,"offline")){

@@ -52,10 +52,15 @@ class RollingBuffer:
         return refs
 
 class Capture:
-    def __init__(self, url, token, mode="A", buffer=None):
-        self.url, self.token, self.mode = url.rstrip('/'), token, mode
+    def __init__(self, url, token, mode="A", buffer=None, transport="poll", stream_url=None):
+        if transport not in ("poll", "stream"):
+            raise ValueError("transport must be poll or stream")
+        self.url, self.token, self.mode, self.transport = url.rstrip('/'), token, mode, transport
+        parts = httpx.URL(self.url)
+        self.stream_url = stream_url or str(parts.copy_with(port=81, path="/stream"))
         self.buffer = buffer or RollingBuffer()
         self.client = httpx.Client(timeout=3)
+        self.stream = None
         self.last = None
         self.last_capture = None
         self.offset_us = None
@@ -77,15 +82,39 @@ class Capture:
             r = self.client.post(self.url + "/mode", headers={"X-Camera-Key": self.token}, params={"high": int(enabled)})
             r.raise_for_status()
 
-    def poll(self):
-        start = time.monotonic()
+    def _fetch_poll(self):
         r = self.client.get(self.url + "/jpeg", headers={"X-Camera-Key": self.token})
         r.raise_for_status()
-        if not r.headers.get('content-type','').startswith('image/jpeg') or not r.content.startswith(b'\xff\xd8'):
+        if not r.headers.get('content-type','').startswith('image/jpeg'):
+            raise ValueError('Camera response is not JPEG transport')
+        return r.headers, r.content
+
+    def _fetch_stream(self):
+        if self.stream is None:
+            self.stream = MjpegStream(self.client, self.stream_url, self.token)
+        try:
+            return self.stream.next_part()
+        except Exception:
+            self.close_stream()  # reconnect on the next poll; the frame is reported as a failure
+            raise
+
+    def close_stream(self):
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+
+    def close(self):
+        self.close_stream()
+        self.client.close()
+
+    def poll(self):
+        start = time.monotonic()
+        headers, content = self._fetch_stream() if self.transport == "stream" else self._fetch_poll()
+        if not content.startswith(b'\xff\xd8'):
             raise ValueError('Camera response is not JPEG transport')
         end, wall = time.monotonic(), time.time()
-        seq, boot = int(r.headers["X-Frame-Sequence"]), r.headers["X-Boot-Id"]
-        capture_us = int(r.headers["X-Capture-Us"])
+        seq, boot = int(headers["X-Frame-Sequence"]), headers["X-Boot-Id"]
+        capture_us = int(headers["X-Capture-Us"])
         if self.last_capture and self.last_capture[0]==boot and capture_us<=self.last_capture[1]:
             raise ValueError('Repeated or out-of-order capture timestamp despite new transport sequence')
         if self.last == (boot, seq):
@@ -95,9 +124,59 @@ class Capture:
         if self.clock_boot!=boot:
             raise ValueError('Camera rebooted between frame and clock sample')
         self.last = (boot, seq)
-        frame = Frame(r.content, seq, boot, capture_us, wall, end, (end - start) * 1000, int(r.headers["X-Width"]), int(r.headers["X-Height"]), self.uncertainty_ms, (capture_us + self.offset_us) / 1e6)
+        # For the stream transport, upload_ms is the wait for the next part, not a full request.
+        frame = Frame(content, seq, boot, capture_us, wall, end, (end - start) * 1000, int(headers["X-Width"]), int(headers["X-Height"]), self.uncertainty_ms, (capture_us + self.offset_us) / 1e6)
         if wall - frame.capture_wall > 2:
             raise ValueError("Frame too old; check camera queue and timing")
         self.last_capture=(boot,capture_us)
         self.buffer.append(frame)
         return frame
+
+class MjpegStream:
+    """Reads multipart/x-mixed-replace JPEG parts with per-part ShelfFlow headers."""
+    def __init__(self, client, url, token, max_part=4 * 1024 * 1024):
+        self.max_part = max_part
+        self.context = client.stream("GET", url, headers={"X-Camera-Key": token}, timeout=httpx.Timeout(3, read=3))
+        self.response = self.context.__enter__()
+        self.response.raise_for_status()
+        if not self.response.headers.get("content-type", "").startswith("multipart/x-mixed-replace"):
+            self.close()
+            raise ValueError("Camera stream is not multipart JPEG")
+        self.chunks = self.response.iter_raw()
+        self.data = bytearray()
+
+    def _fill(self):
+        chunk = next(self.chunks, None)
+        if chunk is None:
+            raise ConnectionError("Camera stream ended")
+        self.data += chunk
+        if len(self.data) > self.max_part * 2:
+            raise ValueError("Camera stream part exceeds buffer limit")
+
+    BOUNDARY = b"--sfframe\r\n"
+
+    def next_part(self):
+        while (boundary := self.data.find(self.BOUNDARY)) < 0:
+            self._fill()
+        del self.data[:boundary + len(self.BOUNDARY)]
+        while (split := self.data.find(b"\r\n\r\n")) < 0:
+            self._fill()
+        headers = {}
+        for line in bytes(self.data[:split]).decode("latin-1").split("\r\n"):
+            name, _, value = line.partition(":")
+            headers[name.strip()] = value.strip()
+        del self.data[:split + 4]
+        length = int(headers["Content-Length"])
+        if length <= 0 or length > self.max_part:
+            raise ValueError("Invalid camera stream part length")
+        while len(self.data) < length:
+            self._fill()
+        body = bytes(self.data[:length])
+        del self.data[:length]
+        return httpx.Headers(headers), body
+
+    def close(self):
+        try:
+            self.context.__exit__(None, None, None)
+        except Exception:
+            pass

@@ -3,6 +3,7 @@
 #include <WebServer.h>
 #include <esp_timer.h>
 #include <esp_camera.h>
+#include <atomic>
 #ifdef CAMERA_API_CHECK
 #include "api_check.h"
 #endif
@@ -51,8 +52,44 @@ void loop(){Serial.println(result);delay(2000);}
 void setup(){Serial.begin(115200);Serial.println("UNCONFIGURED OV3660: carrier pins/PSRAM must be verified. No camera pins driven.");}
 void loop(){delay(1000);}
 #else
-WebServer server(80);String boot;uint32_t sequence=0,nextRetry=0,backoff=1000;bool healthy=false,high=false;
+WebServer server(80);WiFiServer streamServer(81);std::atomic<uint32_t> frameSequence{0};std::atomic<uint32_t> streamClients{0};
+String boot;uint32_t nextRetry=0,backoff=1000;bool healthy=false,high=false;
 bool auth(){if(server.header("X-Camera-Key")!=CAMERA_KEY){server.send(401,"text/plain","Unauthorized");return false;}return true;}
+// MJPEG on port 81 in its own task, so /clock, /health and /mode on port 80 stay responsive.
+// One consumer at a time; a new client replaces a stale one. Every part carries the same
+// sequence/boot/capture headers as /jpeg so the laptop keeps checking order and frame age.
+bool streamAuthorized(WiFiClient& c){
+  c.setTimeout(2);bool ok=false;uint32_t start=millis();
+  while(c.connected()&&millis()-start<2000){
+    String line=c.readStringUntil('\n');line.trim();
+    if(line.length()==0)break;
+    int colon=line.indexOf(':');
+    if(colon>0){String name=line.substring(0,colon);name.toLowerCase();String value=line.substring(colon+1);value.trim();if(name=="x-camera-key"&&value==CAMERA_KEY)ok=true;}
+  }
+  return ok;
+}
+void streamTask(void*){
+  for(;;){
+    WiFiClient c=streamServer.available();
+    if(!c){vTaskDelay(pdMS_TO_TICKS(10));continue;}
+    if(!streamAuthorized(c)){c.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\nConnection: close\r\n\r\nUnauthorized");c.stop();continue;}
+    if(!healthy){c.print("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");c.stop();continue;}
+    c.setNoDelay(true);
+    c.print("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace;boundary=sfframe\r\nCache-Control: no-store\r\nX-Boot-Id: "+boot+"\r\n\r\n");
+    streamClients++;
+    while(c.connected()){
+      if(streamServer.hasClient())break; // a reconnecting consumer takes over
+      camera_fb_t* fb=esp_camera_fb_get();
+      if(!fb){vTaskDelay(pdMS_TO_TICKS(5));continue;}
+      uint64_t capture=(uint64_t)fb->timestamp.tv_sec*1000000+fb->timestamp.tv_usec;
+      String part="--sfframe\r\nContent-Type: image/jpeg\r\nContent-Length: "+String(fb->len)+"\r\nX-Frame-Sequence: "+String(frameSequence++)+"\r\nX-Boot-Id: "+boot+"\r\nX-Capture-Us: "+String(capture)+"\r\nX-Width: "+String(fb->width)+"\r\nX-Height: "+String(fb->height)+"\r\n\r\n";
+      bool ok=c.print(part)==part.length()&&c.write(fb->buf,fb->len)==fb->len&&c.print("\r\n")==2;
+      esp_camera_fb_return(fb);
+      if(!ok)break;
+    }
+    streamClients--;c.stop();
+  }
+}
 void configureCarrier(){
   Serial.begin(115200);boot=String(esp_random(),HEX)+String(esp_random(),HEX);
   camera_config_t config={};config.ledc_channel=LEDC_CHANNEL_0;config.ledc_timer=LEDC_TIMER_0;
@@ -61,15 +98,16 @@ void configureCarrier(){
   config.xclk_freq_hz=20000000;config.pixel_format=PIXFORMAT_JPEG;config.frame_size=FRAMESIZE_SVGA;config.jpeg_quality=12;config.fb_count=psramFound()?2:1;config.fb_location=psramFound()?CAMERA_FB_IN_PSRAM:CAMERA_FB_IN_DRAM;config.grab_mode=CAMERA_GRAB_LATEST;
   healthy=esp_camera_init(&config)==ESP_OK;
   if(healthy&&esp_camera_sensor_get()->id.PID!=OV3660_PID){Serial.println("Sensor is not OV3660");healthy=false;esp_camera_deinit();}
-  WiFi.mode(WIFI_STA);WiFi.begin(WIFI_SSID,WIFI_PASSWORD);const char* headers[]={"X-Camera-Key"};server.collectHeaders(headers,1);
+  WiFi.mode(WIFI_STA);WiFi.setSleep(false);WiFi.begin(WIFI_SSID,WIFI_PASSWORD);const char* headers[]={"X-Camera-Key"};server.collectHeaders(headers,1);
   server.on("/clock",HTTP_GET,[]{if(!auth())return;server.send(200,"application/json","{\"boot_id\":\""+boot+"\",\"monotonic_us\":"+String((uint64_t)esp_timer_get_time())+"}");});
-  server.on("/health",HTTP_GET,[]{if(!auth())return;server.send(200,"application/json",String("{\"sensor\":\"OV3660\",\"healthy\":")+(healthy?"true":"false")+",\"psram_bytes\":"+String(ESP.getPsramSize())+",\"high\":"+(high?"true":"false")+"}");});
+  server.on("/health",HTTP_GET,[]{if(!auth())return;server.send(200,"application/json",String("{\"sensor\":\"OV3660\",\"healthy\":")+(healthy?"true":"false")+",\"psram_bytes\":"+String(ESP.getPsramSize())+",\"high\":"+(high?"true":"false")+",\"stream_port\":81,\"stream_clients\":"+String((uint32_t)streamClients)+",\"rssi_dbm\":"+String(WiFi.RSSI())+",\"channel\":"+String(WiFi.channel())+",\"uptime_ms\":"+String(millis())+"}");});
   server.on("/mode",HTTP_POST,[]{if(!auth())return;if(!healthy){server.send(503);return;}bool request=server.arg("high")=="1";if(request!=high){if(request&&!psramFound()){server.send(409,"text/plain","High resolution requires measured board capacity");return;}esp_camera_sensor_get()->set_framesize(esp_camera_sensor_get(),request?FRAMESIZE_QXGA:FRAMESIZE_SVGA);high=request;}server.send(200,"application/json","{\"ok\":true}");});
   server.on("/jpeg",HTTP_GET,[]{if(!auth())return;if(!healthy){server.send(503);return;}camera_fb_t* fb=esp_camera_fb_get();if(!fb){server.send(503);return;}
     uint64_t capture=(uint64_t)fb->timestamp.tv_sec*1000000+fb->timestamp.tv_usec;
-    server.sendHeader("X-Frame-Sequence",String(sequence++));server.sendHeader("X-Boot-Id",boot);server.sendHeader("X-Capture-Us",String(capture));server.sendHeader("X-Width",String(fb->width));server.sendHeader("X-Height",String(fb->height));server.sendHeader("Cache-Control","no-store");
+    server.sendHeader("X-Frame-Sequence",String((uint32_t)frameSequence++));server.sendHeader("X-Boot-Id",boot);server.sendHeader("X-Capture-Us",String(capture));server.sendHeader("X-Width",String(fb->width));server.sendHeader("X-Height",String(fb->height));server.sendHeader("Cache-Control","no-store");
     server.setContentLength(fb->len);server.send(200,"image/jpeg","");server.client().setTimeout(2);server.client().write(fb->buf,fb->len);esp_camera_fb_return(fb);yield();});
-  server.begin();
+  server.begin();streamServer.begin();
+  xTaskCreatePinnedToCore(streamTask,"mjpeg",8192,nullptr,1,nullptr,1);
 }
 bool announced=false;
 void serviceCarrier(){server.handleClient();uint32_t now=millis();

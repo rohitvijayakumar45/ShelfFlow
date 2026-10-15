@@ -23,7 +23,7 @@ from vision.association import ReviewFirstAssociator, roi_pixels
 
 def run(args):
     config=json.loads(Path(args.config).read_text())
-    capture=Capture(args.camera,args.camera_key,args.mode)
+    capture=Capture(args.camera,args.camera_key,args.mode,transport=args.transport)
     detectors={tray: YoloDetector(args.weights,{int(k):v for k,v in config['sku_map'].items()},args.device) if args.weights else UnavailableDetector() for tray in config['trays']}
     markers=[]; previous={}; active={}; raw_events=deque(maxlen=1000); lock=threading.Lock(); overflow=[0];barriers=deque(maxlen=20);rfid_reads=deque(maxlen=100)
     boot=uuid.uuid4().hex; seq=0; last_frame=None; associations=ReviewFirstAssociator()
@@ -154,7 +154,7 @@ def run(args):
                 if checkpoint:
                     seq+=1;wall=time.time();spool_event(DeviceEvent(event_id=uuid.uuid4().hex,event_type='BARRIER',device_id='vision-1',boot_id=boot,sequence_number=seq,capture_start=wall,capture_end=wall,monotonic_ms=int(time.monotonic()*1000),clock_synced=False,clock_uncertainty_ms=9999,calibration_version='UNSET',evidence_refs=['BARRIER:'+checkpoint],sensor_health=Health(ok=not camera_failed,queue_overflow=overflow[0])))
     finally:
-        capture.client.close();api.close();mqtt_client.loop_stop();mqtt_client.disconnect()
+        capture.close();api.close();mqtt_client.loop_stop();mqtt_client.disconnect()
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--camera',required=True);p.add_argument('--camera-key',required=True);p.add_argument('--config',default='vision/config.example.json');p.add_argument('--weights');p.add_argument('--device',default='cpu');p.add_argument('--mode',choices=['A','B'],default='A');p.add_argument('--backend',default='http://127.0.0.1:8000');p.add_argument('--device-key',required=True);p.add_argument('--mqtt',default='localhost');p.add_argument('--spool',default='data/vision-spool');p.add_argument('--evidence',default='evidence');run(p.parse_args())
+    p=argparse.ArgumentParser();p.add_argument('--camera',required=True);p.add_argument('--camera-key',required=True);p.add_argument('--config',default='vision/config.example.json');p.add_argument('--weights');p.add_argument('--device',default='cpu');p.add_argument('--mode',choices=['A','B'],default='A');p.add_argument('--transport',choices=['poll','stream'],default='poll');p.add_argument('--backend',default='http://127.0.0.1:8000');p.add_argument('--device-key',required=True);p.add_argument('--mqtt',default='localhost');p.add_argument('--spool',default='data/vision-spool');p.add_argument('--evidence',default='evidence');run(p.parse_args())
