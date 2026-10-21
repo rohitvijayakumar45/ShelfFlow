@@ -1,0 +1,420 @@
+{
+ "train": "data/shelf-pilot/objects/train",
+ "test": "data/shelf-pilot/objects/val",
+ "threshold": 0.68,
+ "margin": 0.06,
+ "repeats": 10,
+ "products": {
+  "sanitizer": 48,
+  "sunscreen": 43,
+  "vicks": 41
+ },
+ "test_crops": {
+  "sanitizer": 16,
+  "sunscreen": 16,
+  "vicks": 18
+ },
+ "rows": [
+  {
+   "shots": 1,
+   "augmented": false,
+   "held_out": null,
+   "known_correct": 0.418,
+   "known_top1": 0.76,
+   "known_rejected": 0.568,
+   "known_wrong": 0.014,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 1,
+   "augmented": false,
+   "held_out": "sanitizer",
+   "known_correct": 0.559,
+   "known_top1": 0.894,
+   "known_rejected": 0.441,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.138
+  },
+  {
+   "shots": 1,
+   "augmented": false,
+   "held_out": "sunscreen",
+   "known_correct": 0.421,
+   "known_top1": 0.862,
+   "known_rejected": 0.579,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 1,
+   "augmented": false,
+   "held_out": "vicks",
+   "known_correct": 0.306,
+   "known_top1": 0.731,
+   "known_rejected": 0.672,
+   "known_wrong": 0.022,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 1,
+   "augmented": true,
+   "held_out": null,
+   "known_correct": 0.554,
+   "known_top1": 0.762,
+   "known_rejected": 0.438,
+   "known_wrong": 0.008,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 1,
+   "augmented": true,
+   "held_out": "sanitizer",
+   "known_correct": 0.638,
+   "known_top1": 0.891,
+   "known_rejected": 0.362,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.144
+  },
+  {
+   "shots": 1,
+   "augmented": true,
+   "held_out": "sunscreen",
+   "known_correct": 0.559,
+   "known_top1": 0.853,
+   "known_rejected": 0.441,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.044
+  },
+  {
+   "shots": 1,
+   "augmented": true,
+   "held_out": "vicks",
+   "known_correct": 0.384,
+   "known_top1": 0.725,
+   "known_rejected": 0.603,
+   "known_wrong": 0.013,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 3,
+   "augmented": false,
+   "held_out": null,
+   "known_correct": 0.618,
+   "known_top1": 0.842,
+   "known_rejected": 0.35,
+   "known_wrong": 0.032,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 3,
+   "augmented": false,
+   "held_out": "sanitizer",
+   "known_correct": 0.715,
+   "known_top1": 0.941,
+   "known_rejected": 0.285,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.275
+  },
+  {
+   "shots": 3,
+   "augmented": false,
+   "held_out": "sunscreen",
+   "known_correct": 0.703,
+   "known_top1": 0.929,
+   "known_rejected": 0.297,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 3,
+   "augmented": false,
+   "held_out": "vicks",
+   "known_correct": 0.534,
+   "known_top1": 0.8,
+   "known_rejected": 0.416,
+   "known_wrong": 0.05,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 3,
+   "augmented": true,
+   "held_out": null,
+   "known_correct": 0.706,
+   "known_top1": 0.852,
+   "known_rejected": 0.26,
+   "known_wrong": 0.034,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 3,
+   "augmented": true,
+   "held_out": "sanitizer",
+   "known_correct": 0.771,
+   "known_top1": 0.95,
+   "known_rejected": 0.229,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.269
+  },
+  {
+   "shots": 3,
+   "augmented": true,
+   "held_out": "sunscreen",
+   "known_correct": 0.771,
+   "known_top1": 0.95,
+   "known_rejected": 0.229,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.175
+  },
+  {
+   "shots": 3,
+   "augmented": true,
+   "held_out": "vicks",
+   "known_correct": 0.603,
+   "known_top1": 0.819,
+   "known_rejected": 0.347,
+   "known_wrong": 0.05,
+   "unknown_accepted": 0.011
+  },
+  {
+   "shots": 5,
+   "augmented": false,
+   "held_out": null,
+   "known_correct": 0.672,
+   "known_top1": 0.86,
+   "known_rejected": 0.312,
+   "known_wrong": 0.016,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 5,
+   "augmented": false,
+   "held_out": "sanitizer",
+   "known_correct": 0.729,
+   "known_top1": 0.95,
+   "known_rejected": 0.271,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.325
+  },
+  {
+   "shots": 5,
+   "augmented": false,
+   "held_out": "sunscreen",
+   "known_correct": 0.738,
+   "known_top1": 0.95,
+   "known_rejected": 0.262,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 5,
+   "augmented": false,
+   "held_out": "vicks",
+   "known_correct": 0.556,
+   "known_top1": 0.838,
+   "known_rejected": 0.419,
+   "known_wrong": 0.025,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 5,
+   "augmented": true,
+   "held_out": null,
+   "known_correct": 0.708,
+   "known_top1": 0.868,
+   "known_rejected": 0.276,
+   "known_wrong": 0.016,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 5,
+   "augmented": true,
+   "held_out": "sanitizer",
+   "known_correct": 0.8,
+   "known_top1": 0.956,
+   "known_rejected": 0.2,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.306
+  },
+  {
+   "shots": 5,
+   "augmented": true,
+   "held_out": "sunscreen",
+   "known_correct": 0.803,
+   "known_top1": 0.959,
+   "known_rejected": 0.197,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.169
+  },
+  {
+   "shots": 5,
+   "augmented": true,
+   "held_out": "vicks",
+   "known_correct": 0.603,
+   "known_top1": 0.847,
+   "known_rejected": 0.375,
+   "known_wrong": 0.022,
+   "unknown_accepted": 0.022
+  },
+  {
+   "shots": 10,
+   "augmented": false,
+   "held_out": null,
+   "known_correct": 0.752,
+   "known_top1": 0.934,
+   "known_rejected": 0.246,
+   "known_wrong": 0.002,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 10,
+   "augmented": false,
+   "held_out": "sanitizer",
+   "known_correct": 0.753,
+   "known_top1": 0.95,
+   "known_rejected": 0.247,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.331
+  },
+  {
+   "shots": 10,
+   "augmented": false,
+   "held_out": "sunscreen",
+   "known_correct": 0.844,
+   "known_top1": 0.965,
+   "known_rejected": 0.156,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 10,
+   "augmented": false,
+   "held_out": "vicks",
+   "known_correct": 0.678,
+   "known_top1": 0.931,
+   "known_rejected": 0.319,
+   "known_wrong": 0.003,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": 10,
+   "augmented": true,
+   "held_out": null,
+   "known_correct": 0.796,
+   "known_top1": 0.934,
+   "known_rejected": 0.194,
+   "known_wrong": 0.01,
+   "unknown_accepted": null
+  },
+  {
+   "shots": 10,
+   "augmented": true,
+   "held_out": "sanitizer",
+   "known_correct": 0.835,
+   "known_top1": 0.959,
+   "known_rejected": 0.153,
+   "known_wrong": 0.012,
+   "unknown_accepted": 0.312
+  },
+  {
+   "shots": 10,
+   "augmented": true,
+   "held_out": "sunscreen",
+   "known_correct": 0.874,
+   "known_top1": 0.959,
+   "known_rejected": 0.124,
+   "known_wrong": 0.003,
+   "unknown_accepted": 0.344
+  },
+  {
+   "shots": 10,
+   "augmented": true,
+   "held_out": "vicks",
+   "known_correct": 0.738,
+   "known_top1": 0.941,
+   "known_rejected": 0.256,
+   "known_wrong": 0.006,
+   "unknown_accepted": 0.017
+  },
+  {
+   "shots": "all",
+   "augmented": false,
+   "held_out": null,
+   "known_correct": 0.82,
+   "known_top1": 0.92,
+   "known_rejected": 0.18,
+   "known_wrong": 0.0,
+   "unknown_accepted": null
+  },
+  {
+   "shots": "all",
+   "augmented": false,
+   "held_out": "sanitizer",
+   "known_correct": 0.824,
+   "known_top1": 0.971,
+   "known_rejected": 0.176,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.438
+  },
+  {
+   "shots": "all",
+   "augmented": false,
+   "held_out": "sunscreen",
+   "known_correct": 0.882,
+   "known_top1": 0.971,
+   "known_rejected": 0.118,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": "all",
+   "augmented": false,
+   "held_out": "vicks",
+   "known_correct": 0.75,
+   "known_top1": 0.906,
+   "known_rejected": 0.25,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.0
+  },
+  {
+   "shots": "all",
+   "augmented": true,
+   "held_out": null,
+   "known_correct": 0.86,
+   "known_top1": 0.96,
+   "known_rejected": 0.14,
+   "known_wrong": 0.0,
+   "unknown_accepted": null
+  },
+  {
+   "shots": "all",
+   "augmented": true,
+   "held_out": "sanitizer",
+   "known_correct": 0.912,
+   "known_top1": 0.971,
+   "known_rejected": 0.088,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.375
+  },
+  {
+   "shots": "all",
+   "augmented": true,
+   "held_out": "sunscreen",
+   "known_correct": 0.912,
+   "known_top1": 1.0,
+   "known_rejected": 0.088,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.438
+  },
+  {
+   "shots": "all",
+   "augmented": true,
+   "held_out": "vicks",
+   "known_correct": 0.812,
+   "known_top1": 0.969,
+   "known_rejected": 0.188,
+   "known_wrong": 0.0,
+   "unknown_accepted": 0.056
+  }
+ ],
+ "note": "Frame-level single crops from a separate session. Not shopping accuracy."
+}

@@ -1,6 +1,15 @@
 # Mixed-product trays (unit tracking)
 
-Status: **backend implemented and covered by automated tests (simulation data). Not yet exercised on the physical shelf.** The staff loading wizard and the vision placement/emptied-spot capture are the next steps.
+Status: **backend and staff loading wizard implemented; backend covered by automated tests and the wizard exercised in the browser against a simulation database. Not yet exercised on the physical shelf.** Vision placement crops and emptied-spot detection are the next step.
+
+## Staff wizard (Staff app → Tray loading)
+
+1. Switch the (empty) tray to per-item tracking, then start a loading session with an audit reason.
+2. Choose the product and optional spot, press **Ready**. A camera still is saved (if the camera is configured), then the wizard waits for the next settled weight increase on that tray. In simulation mode a **Simulate placement** button produces that reading.
+3. Check weight, noise, spot and before/after stills, then **Save item** or **Redo**. A close-weight warning is shown immediately.
+4. Repeat, then **Finish loading**. Items can be removed later with an audit reason.
+
+Stills are stored under `EVIDENCE_ROOT/catalogue/` and served only to staff (`/staff/catalogue-file/…`). Unlike shopper evidence, they are not deleted by evidence retention, because later recognition depends on them. They are full frames; per-item crops come with the vision step.
 
 The original first deployment assumed one product type per tray. This is a deliberate extension: a tray (about 20 cm, ~3 items) may hold different products. A tray switches into this mode only while it is empty, and single-product trays keep working unchanged.
 

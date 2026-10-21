@@ -126,9 +126,45 @@ def metrics(a):
 def train(a):
     from ultralytics import YOLO
     model=YOLO(a.model)
-    if a.action=='train':model.train(data=a.data,epochs=a.epochs,imgsz=a.imgsz,device=a.device,seed=42)
+    if a.action=='train':model.train(data=a.data,epochs=a.epochs,imgsz=a.imgsz,device=a.device,seed=42,single_cls=a.single_class,batch=a.batch,patience=a.patience)
     elif a.action=='evaluate':model.val(data=a.data,split='test',device=a.device,imgsz=a.imgsz)
     else:model.export(format=a.format,device=a.device)
+
+def _names(value):
+    # Class names from a comma list or from a data.yaml 'names' mapping.
+    if value.endswith(('.yaml','.yml')):
+        import yaml
+        names=yaml.safe_load(Path(value).read_text())['names']
+        return [names[i] for i in sorted(names)] if isinstance(names,dict) else list(names)
+    return [n.strip() for n in value.split(',') if n.strip()]
+
+def _embedder(a):
+    from vision.identify import Dinov2Embedder
+    return Dinov2Embedder(a.device)
+
+def crop(a):
+    from tools.dataset.recognition import crop_dataset
+    rois={k:v['roi'] for k,v in json.loads(Path(a.config).read_text())['trays'].items()}
+    m=crop_dataset(a.root,rois,a.output,a.min_visible,a.single_class)
+    print(json.dumps({'crops':len(m['crops']),'skipped_partial':m['skipped_partial'],'manifest':str(Path(a.output)/'crop-manifest.json')},indent=2))
+
+def objects(a):
+    from tools.dataset.recognition import object_crops
+    print(json.dumps(object_crops(a.root,_names(a.names),a.output,a.pad),indent=2))
+
+def enroll_cmd(a):
+    from tools.dataset.recognition import enroll
+    print(json.dumps(enroll(a.folder,a.output,_embedder(a)),indent=2))
+
+def gallery_eval_cmd(a):
+    from tools.dataset.recognition import gallery_eval
+    report=gallery_eval(a.gallery_dir,a.query_dir,[h for h in a.holdout.split(',') if h],_embedder(a),a.max_error)
+    Path(a.output).write_text(json.dumps(report,indent=1))
+    print(json.dumps({k:report[k] for k in ('queries','known_products','unknown_products','held_out_from_gallery','chosen')},indent=2))
+
+def make_yaml_cmd(a):
+    from tools.dataset.recognition import make_yaml
+    print(make_yaml(a.dataset,_names(a.names) if a.names else [],a.output,a.single_class))
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
@@ -141,7 +177,12 @@ def main():
     q=sub.add_parser('weights');q.add_argument('--host',default='localhost');q.add_argument('--seconds',type=int,default=60);q.add_argument('--output',required=True);q.set_defaults(fn=weight_trace)
     q=sub.add_parser('replay');q.add_argument('file');q.add_argument('--key',required=True);q.add_argument('--backend',default='http://127.0.0.1:8000');q.set_defaults(fn=replay)
     q=sub.add_parser('metrics');q.add_argument('file');q.add_argument('--output',required=True);q.set_defaults(fn=metrics)
-    q=sub.add_parser('model');q.add_argument('action',choices=['train','evaluate','export']);q.add_argument('--model',default='yolo26n.pt');q.add_argument('--data',default='tools/dataset/data.example.yaml');q.add_argument('--device',default='cpu');q.add_argument('--epochs',type=int,default=100);q.add_argument('--imgsz',type=int,default=960);q.add_argument('--format',default='onnx');q.set_defaults(fn=train)
+    q=sub.add_parser('model');q.add_argument('action',choices=['train','evaluate','export']);q.add_argument('--model',default='yolo26n.pt');q.add_argument('--data',default='tools/dataset/data.example.yaml');q.add_argument('--device',default='cpu');q.add_argument('--epochs',type=int,default=100);q.add_argument('--imgsz',type=int,default=960);q.add_argument('--format',default='onnx');q.add_argument('--single-class',action='store_true',help='train one "item" class (open-set path)');q.add_argument('--batch',type=int,default=16);q.add_argument('--patience',type=int,default=30);q.set_defaults(fn=train)
+    q=sub.add_parser('crop',help='full-frame dataset -> tray crops with transformed labels');q.add_argument('root');q.add_argument('--config',required=True,help='vision config with tray ROIs');q.add_argument('--output',required=True);q.add_argument('--min-visible',type=float,default=0.4);q.add_argument('--single-class',action='store_true');q.set_defaults(fn=crop)
+    q=sub.add_parser('objects',help='labelled dataset -> per-product item crops');q.add_argument('root');q.add_argument('--names',required=True,help='comma list or data.yaml');q.add_argument('--output',required=True);q.add_argument('--pad',type=float,default=0.1);q.set_defaults(fn=objects)
+    q=sub.add_parser('enroll',help='folder/<product_id>/*.png -> gallery .npz');q.add_argument('folder');q.add_argument('--output',required=True);q.add_argument('--device',default='cpu');q.set_defaults(fn=enroll_cmd)
+    q=sub.add_parser('gallery-eval',help='open-set evaluation with held-out products');q.add_argument('--gallery-dir',required=True);q.add_argument('--query-dir',required=True);q.add_argument('--holdout',default='',help='products left out of the gallery (simulate unseen items)');q.add_argument('--max-error',type=float,default=0.01);q.add_argument('--device',default='cpu');q.add_argument('--output',required=True);q.set_defaults(fn=gallery_eval_cmd)
+    q=sub.add_parser('make-yaml');q.add_argument('dataset');q.add_argument('--names');q.add_argument('--output',required=True);q.add_argument('--single-class',action='store_true');q.set_defaults(fn=make_yaml_cmd)
     a=p.parse_args();a.fn(a)
 
 if __name__=='__main__':main()

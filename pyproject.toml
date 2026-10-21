@@ -14,8 +14,10 @@ dependencies = [
 ]
 [project.optional-dependencies]
 test = ["pytest==8.3.5", "pytest-cov==6.1.1"]
-vision = ["ultralytics==8.4.174", "opencv-python==4.11.0.86", "numpy==2.2.5", "PyYAML==6.0.2"]
+vision = ["ultralytics==8.4.174", "opencv-python==4.11.0.86", "numpy==2.2.5", "PyYAML==6.0.2", "transformers==4.51.3"]
+# GPU: install the matched CUDA wheels in requirements-gpu.txt (see docs/recognition.md)
 firmware = ["platformio==6.1.18"]
+hardware = ["pyserial==3.5"]
 [tool.setuptools.packages.find]
 include = ["backend*", "vision*", "simulator*", "tools*"]
 [tool.pytest.ini_options]

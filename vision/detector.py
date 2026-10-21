@@ -45,6 +45,29 @@ class YoloDetector:
             output.append(Detection(self.sku_map[int(box.cls.item())], float(box.conf.item()), tuple(box.xyxy[0].tolist()), int(box.id.item()) if box.id is not None else None))
         return output
 
+class AgnosticDetector:
+    """Single-class "item" detector (custom YOLO26 trained with one class).
+
+    It finds any graspable item, including products it never saw in training; WHICH product
+    is decided afterwards by vision.identify (gallery) and the tray weights. Detections leave
+    here as UNKNOWN.
+    """
+    status = "TRAINED"
+
+    def __init__(self, weights, device="cpu", conf=0.25):
+        if not Path(weights).is_file():
+            raise FileNotFoundError("Item detector weights unavailable; train with tools.dataset.cli model train --single-class")
+        from ultralytics import YOLO
+        self.model = YOLO(weights)
+        self.device, self.conf = device, conf
+        if len(self.model.names) != 1:
+            raise ValueError("Item detector must have exactly one class (train with --single-class)")
+
+    def detect(self, image):
+        result = self.model.track(image, persist=True, tracker="bytetrack.yaml", device=self.device, conf=self.conf, verbose=False)[0]
+        return [Detection("UNKNOWN", float(b.conf.item()), tuple(b.xyxy[0].tolist()), int(b.id.item()) if b.id is not None else None)
+                for b in result.boxes]
+
 class OptionalPose:
     """Full-body arm linkage hints only. Pose never proves grasp or customer ownership."""
     def __init__(self, weights="yolo26n-pose.pt", device="cpu", full_body_verified=False):
