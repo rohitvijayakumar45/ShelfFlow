@@ -1,5 +1,13 @@
 # Programming the OV3660 camera board with a second ESP32 (no USB-TTL adapter)
 
+**15 October hardware update:** the user now uses a **new 38-pin ESP32 as the
+camera programmer**, separate from the shelf sensor ESP32. Use its GPIO1/TX,
+GPIO3/RX, EN and GND labels for Method A; pin count is not a board model.
+The user has reported OV3660 PID 0x3660, successful initialization and a
+640x480 JPEG, with 4 MB flash and 4 MB PSRAM on the camera. The new programmer
+wiring itself has not yet been tested. See the [current connections](dual-rc522-and-38pin-programmer.md).
+The staged procedure below was written before that successful camera report.
+
 Status: **procedure and firmware builds verified on the development PC; no step below has been
 performed on physical hardware yet.** Every stage ends with a check you can see on screen or measure.
 If a check does not match, stop at that stage and use the troubleshooting table at the end.
@@ -16,7 +24,7 @@ the camera pin map by reading the sensor's ID back, before anything relies on it
 | Qty | Item | Note |
 |---:|---|---|
 | 1 | Camera board (ESP32-S module + OV3660 on ribbon cable) | Remove the microSD card if one is inserted |
-| 1 | "Programmer" ESP32 dev board with a USB port | Later becomes the shelf sensor controller |
+| 1 | New 38-pin programmer ESP32 with a USB-UART port | Separate from the existing shelf sensor controller |
 | 1 | USB **data** cable for the programmer | Charge-only cables give no COM port |
 | 6 | Female-to-female Dupont jumper wires, 10–20 cm | Suggested colours below |
 | 1 | Digital multimeter with continuity beeper | Required for the checks |
@@ -428,3 +436,99 @@ Primary references: [Espressif DevKitC guide](https://documentation.espressif.co
 [esptool v4 reset modes](https://docs.espressif.com/projects/esptool/en/release-v4/esp32/esptool/advanced-options.html),
 [ESP32 boot-mode selection](https://docs.espressif.com/projects/esptool/en/latest/esp32/advanced-topics/boot-mode-selection.html),
 [esp32-camera driver and board pin tables](https://github.com/espressif/esp32-camera).
+
+
+## Cached camera preview
+
+The normal camera mode is now QVGA (320x240); the optional high-resolution
+mode remains QXGA. `frame_cache.cpp` owns all runtime framebuffer reads and
+copies the latest JPEG into PSRAM, at most ten times per second. `/jpeg` and
+MJPEG consumers share immutable snapshots. A slow network send no longer
+holds a driver framebuffer, and consumers skip superseded frames rather than
+building an application-level queue. Captures older than two seconds are not
+served as fresh images. TCP buffers can still add latency on a slow connection.
+
+`/health` reports `cached_frame_ready` and, when fresh, its sequence, age and
+size. After flashing, check that the sequence advances, dimensions are 320x240,
+and the local preview receives new frames over a sustained interval. The
+capture limit is not a measured delivered frame rate. This change needs a
+physical upload before performance can be evaluated.
+
+
+### Runtime comparison build
+
+Authenticated `POST /tune?clock_mhz=16&quality=20&fps=10` can compare 8/16/20 MHz
+OV3660 clock settings, JPEG quality 10..30, and capture limits 5..25 FPS without
+reflashing each profile. Settings are RAM-only and reset to 8 MHz / quality 12 /
+20 FPS and 320x240 at reboot. Changing the clock reapplies the current sensor frame size
+so the driver recalculates its PLL; capture and tuning share a mutex. `/health`
+reports the selected settings. Invalid or unauthenticated tuning is rejected.
+
+The MJPEG writer uses nonblocking socket sends with one 500 ms deadline across
+the part header, JPEG and separator. A partial/expired write closes the stream
+so the local preview reconnects. This bounds time spent enqueueing each frame;
+it does not bound radio retries, TCP delivery, or browser display time.
+
+With the local preview running, execute:
+
+```powershell
+.venv\Scripts\python.exe -m tools.camera_benchmark --camera http://CAMERA_IP
+```
+
+The tool compares six clock/quality/rate profiles and repeats the baseline last,
+saving records under ignored `data/hardware-backups/`. Each profile has a 30 s
+receive window including outages. Capture-to-receiver age estimates include a
+clock-offset estimate and reported uncertainty; they exclude browser rendering.
+Keep the camera view, lighting and hardware setup fixed during comparisons.
+
+
+For the experimental 8 MHz comparison, hold JPEG quality and capture limit
+constant and repeat the 20 MHz baseline afterward:
+
+```powershell
+.venv\Scripts\python.exe -m tools.camera_benchmark --camera http://CAMERA_IP --clocks 20 8 20 --quality 12 --fps-limit 10 --duration 30 --output data/hardware-backups/camera-benchmark-8mhz.json
+```
+
+The 8 MHz camera-clock workaround comes from reports on other ESP32 camera
+setups, primarily OV2640. On OV3660 this is an experiment, not a validated FPS
+improvement; the driver reapplies its own sensor PLL profile after changing
+XCLK. A lower clock may reduce capture FPS even if network delay improves.
+
+
+### Resolution comparison
+
+The resolution-test build boots at the measured 8 MHz clock and a 20 FPS capture
+limit. On a PSRAM board it initializes the driver with QXGA-sized JPEG buffers,
+then lowers the sensor to 320x240 before starting capture. This reserves room
+for larger runtime frames; changing a sensor size cannot resize existing driver
+buffers. Boards without PSRAM stay at QVGA.
+
+`POST /tune` also accepts optional `resolution=320x240`, `480x320`, `640x480`, or
+`800x600`; the clock, quality and FPS arguments are still required. Larger modes
+require detected PSRAM. The resolution is changed under the same capture mutex.
+
+Compare sizes while keeping clock and quality fixed:
+
+```powershell
+.venv\Scripts\python.exe -m tools.camera_benchmark --camera http://CAMERA_IP --clocks 8 --resolutions 320x240 480x320 640x480 320x240 --quality 12 --fps-limit 20 --duration 30 --output data/hardware-backups/camera-resolution-comparison.json
+```
+
+The tool excludes in-flight frames with the previous dimensions and saves a
+JPEG for each profile next to the report. Check actual received dimensions,
+image detail, FPS, frame-age uncertainty and long gaps before choosing a size.
+
+
+## Multiple camera Wi-Fi networks
+
+In the ignored `firmware/camera/include/secrets.h`, keep `WIFI_SSID` and
+`WIFI_PASSWORD` for the primary network. Add `WIFI_SSID_2` / `WIFI_PASSWORD_2`
+and optionally `WIFI_SSID_3` / `WIFI_PASSWORD_3` for fallback networks.
+Empty SSIDs are skipped. Use 2.4 GHz networks.
+
+The camera tries each configured entry for 15 seconds without blocking the video
+loop. It stays on a connected network and cycles entries after disconnection.
+It does not automatically switch back while the current connection works.
+Rebuild and upload camera firmware after changing credentials. Serial output
+shows the selected SSID and new IP address, never the password. Switching
+networks interrupts the feed; connect the laptop to the same network and point
+the local preview at the camera's new address.

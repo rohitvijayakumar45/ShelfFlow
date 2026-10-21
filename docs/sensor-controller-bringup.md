@@ -1,194 +1,272 @@
-# Shelf sensor controller: step-by-step connections (RC522 + two HX711 trays)
+# Shelf sensor controller: tripod box (3 load cells), RC522, 16x2 LCD and service buttons
 
-Status: **pin map and firmware compile-verified; not yet wired or powered.** The controller is the same
-ordinary ESP32 board that programmed the camera ([programming-camera.md](programming-camera.md)),
-after all programming wires and J1 are removed. Proposed for an ESP32-WROOM-32 dev board (DevKitC V4 or
-30-pin DEVKIT V1). If your module is WROVER, S2, S3 or C3, stop and re-check every pin below.
+Status: **firmware compiles; payloads validated against the backend schema; calibration and position maths
+checked numerically. Not yet wired or run on the physical shelf.** The controller is the existing ordinary ESP32 (WROOM-32,
+30-pin DEVKIT V1); a **new, separate 38-pin ESP32 now programs the camera**. Remove all old camera programming wires
+and the EN jumper from this sensor controller. See [current board roles and connections](dual-rc522-and-38pin-programmer.md). If your module is
+WROVER, S2, S3 or C3, stop: GPIO16/17 and other pins below differ.
 
-Bring modules up **one at a time**: RC522 first, then tray A, then tray B. After each module, the serial
-`DIAG` line proves it works before you add the next one.
+The box (tray) rests on **three load cells in a tripod**: A bottom-left, B bottom-right, C top-middle. Each cell has its
+own HX711. The total weight is the sum of the three. How a change splits across the cells gives the **position**
+on the box where an item was taken or placed. A 16x2 LCD shows live readings, and two **staff-only** buttons inside the
+enclosure page the display and run on-shelf calibration. They are never customer controls.
 
 ## Parts
 
 | Qty | Part | Required specification |
 |---:|---|---|
-| 1 | ESP32-WROOM-32 dev board | The former programmer |
-| 1 | RC522 module (8 pins: SDA SCK MOSI MISO IRQ GND RST 3.3V) | **3.3 V only** |
-| 2 | HX711 modules (MCU side: GND DT SCK VCC; cell side: E+ E- A- A+ B- B+) | Powered from 3.3 V so DT never exceeds 3.3 V |
-| 2 | Four-wire full-bridge load cells (bar type) | Rated above tray + full stock mass, with margin |
-| ~14 | Female-female Dupont wires | Plus screw terminals or solder for load-cell leads |
-| 1 | Multimeter | Resistance, continuity, DC volts |
-| 2 | Known reference masses | For example 200 g and 500 g, ideally a calibrated weight or a kitchen-scale-checked object |
+| 1 | ESP32-WROOM-32 dev board | 30-pin DEVKIT V1 labels used below |
+| 3 | HX711 modules | Powered from **3.3 V** so DT never exceeds 3.3 V |
+| 3 | Four-wire full-bridge bar load cells | **Each** rated for the full loaded box plus margin (an item near one corner can load one cell heavily) |
+| 2 | RC522 modules | 3.3 V only; separate R1/R2 chip selects |
+| 1 | 16x2 LCD with PCF8574 I2C backpack | Address 0x27 or 0x3F (auto-detected) |
+| 1 | **Bi-directional I2C level shifter** (BSS138, 4-channel) | Needed when the LCD backpack runs at 5 V (most do). Skip only for a true 3.3 V LCD |
+| 2 | Momentary push buttons | Normally open; mounted **inside** the enclosure |
+| 1 | 100–470 µF electrolytic capacitor | Across ESP 3V3–GND; stops Wi-Fi brownouts |
+| 1 | Stiff box base | 6 mm or thicker plywood or acrylic, so weight transfers predictably to the three cells |
 
 ## Master pin table
 
-| Controller label (DevKitC / DEVKIT V1) | GPIO | Goes to | Wire colour (suggested) |
-|---|---:|---|---|
-| IO18 / D18 | 18 | RC522 **SCK** | orange |
-| IO23 / D23 | 23 | RC522 **MOSI** | yellow |
-| IO19 / D19 | 19 | RC522 **MISO** | green |
-| IO21 / D21 | 21 | RC522 **SDA** (= SPI chip select, not I²C) | blue |
-| IO22 / D22 | 22 | RC522 **RST** | purple |
-| 3V3 | – | RC522 **3.3V** | red |
-| GND | – | RC522 **GND** | black |
-| – | – | RC522 **IRQ**: leave unconnected | – |
-| IO32 / D32 | 32 | HX711 **A** DT | white |
-| IO33 / D33 | 33 | HX711 **A** SCK | grey |
-| IO25 / D25 | 25 | HX711 **B** DT | white (tag "B") |
-| IO26 / D26 | 26 | HX711 **B** SCK | grey (tag "B") |
-| 3V3 | – | HX711 A **VCC** and HX711 B **VCC** | red |
-| GND | – | HX711 A **GND** and HX711 B **GND** | black |
-| IO27 / D27 (optional) | 27 | LED anode through a resistor, cathode to GND | – (status LED not driven by current firmware) |
+| Device | Pin | ESP32 (30-pin label) | GPIO | Note |
+|---|---|---|---:|---|
+| HX711 **A** (bottom-left) | VCC / GND | 3V3 / GND | – | |
+| | DT | **D32** | 32 | |
+| | SCK | **D33** | 33 | |
+| HX711 **B** (bottom-right) | VCC / GND | 3V3 / GND | – | |
+| | DT | **D25** | 25 | |
+| | SCK | **D26** | 26 | |
+| HX711 **C** (top-middle) | VCC / GND | 3V3 / GND | – | |
+| | DT | **D34** | 34 | input-only pin: fine for DT, never SCK |
+| | SCK | **D27** | 27 | |
+| RC522 R1 and R2 | 3.3V / GND | 3V3 / GND | – | Shared power/ground |
+| R1 | SDA (chip select) | **D21** | 21 | R1 only |
+| R2 | SDA (chip select) | **D4** | 4 | R2 only |
+| | SCK / MOSI / MISO | **D18 / D23 / D19** | 18 / 23 / 19 | |
+| | RST | **D22** | 22 | IRQ not connected |
+| LCD (through level shifter) | SDA | **RX2** | 16 | **not** 21/22 (RC522 uses them) |
+| | SCL | **TX2** | 17 | |
+| Button **PAGE** | one leg | **D13** | 13 | other leg to GND (internal pull-up) |
+| Button **ACTION** | one leg | **D14** | 14 | other leg to GND |
 
-Pin safety check: none of 18, 19, 21, 22, 23, 25, 26, 27, 32, 33 is a boot-strap pin (0, 2, 5, 12, 15),
-a flash pin (6–11) or an input-only pin (34–39). The 3V3 pin feeds three small modules, roughly
-30 mA in total, well within the dev board regulator. **Never** power the RC522 or HX711 from 5V/VIN.
+None of these is a boot-strap pin (0, 2, 5, 12, 15) or a flash pin (6–11). GPIO14 briefly toggles at boot, which is
+harmless for a button input.
 
-```text
-                     ┌───────────── ESP32-WROOM-32 dev board (USB to laptop) ─────────────┐
-                     │ 3V3   GND   18   23   19   21   22        32   33        25   26     │
-                     └──┬─────┬────┬────┬────┬────┬────┬──────────┬────┬─────────┬────┬────┘
-   3V3 rail ────────────┤     │    │    │    │    │    │          │    │         │    │
-   GND rail ──────────────────┤    │    │    │    │    │          │    │         │    │
-                        │     │    │    │    │    │    │          │    │         │    │
-   RC522   3.3V ◄───────┤     │    │    │    │    │    │          │    │         │    │
-           GND  ◄─────────────┤    │    │    │    │    │          │    │         │    │
-           SCK  ◄──────────────────┘    │    │    │    │          │    │         │    │
-           MOSI ◄───────────────────────┘    │    │    │          │    │         │    │
-           MISO ────────────────────────────►┘    │    │          │    │         │    │
-           SDA  ◄─────────────────────────────────┘    │          │    │         │    │
-           RST  ◄──────────────────────────────────────┘          │    │         │    │
-           IRQ   (not connected)                                  │    │         │    │
-                                                                  │    │         │    │
-   HX711 A VCC ◄── 3V3   GND ◄── GND   DT ───────────────────────►┘    │         │    │
-                                       SCK ◄───────────────────────────┘         │    │
-           E+ E- A- A+ ── load cell A (tray A)                                   │    │
-                                                                                 │    │
-   HX711 B VCC ◄── 3V3   GND ◄── GND   DT ──────────────────────────────────────►┘    │
-                                       SCK ◄──────────────────────────────────────────┘
-           E+ E- A- A+ ── load cell B (tray B)        (B- / B+ channel unused on both)
-```
-
-## Step 0: prepare the board (no modules attached)
-
-1. Confirm the programmer wires and J1 (EN to GND) from camera programming are **removed**.
-2. Create `firmware\shelf-controller\include\secrets.h` from `firmware\common\Secrets.example.h`.
-   You can leave Wi-Fi/MQTT unset for bench bring-up: the `DIAG` output works offline.
-3. Flash the firmware:
-   ```powershell
-   .\.venv\Scripts\pio.exe run -d firmware\shelf-controller -t upload --upload-port COM5
-   ```
-4. Initialize the event-queue filesystem **once** (the firmware never auto-formats queued evidence):
-   ```powershell
-   .\.venv\Scripts\pio.exe run -d firmware\shelf-controller -t uploadfs --upload-port COM5
-   ```
-5. Open the monitor:
-   ```powershell
-   .\.venv\Scripts\pio.exe device monitor -d firmware\shelf-controller -p COM5
-   ```
-   Expected once per second:
-   `DIAG raw tray-a=0(NO_DATA) tray-b=0(NO_DATA) rc522_version=0x00 wifi=down mqtt=down fs=ok`
-   * `fs=MISSING` → step 4 did not run.
-   * `NO_DATA` and `0x00` are correct while nothing is attached.
-6. Unplug USB.
-
-## Step 1: RC522 (power off while wiring)
-
-1. Read the RC522 silkscreen. Confirm the labels `SDA SCK MOSI MISO IRQ GND RST 3.3V` and that the
-   power pin is **3.3V**, not 5V.
-2. Wire, in this order: GND (black) → 3.3V (red) → SCK 18 → MOSI 23 → MISO 19 → SDA 21 → RST 22.
-3. Meter, power off: RC522 3.3V to RC522 GND **must not beep**. Controller GND to RC522 GND **beeps**.
-4. Plug in USB and measure RC522 3.3V to GND: **3.2–3.4 V**.
-5. Monitor: `rc522_version=0x91` or `0x92` (genuine NXP) or `0x88` / `0x12` (common clones).
-   * `0x00` or `0xFF` → no SPI communication. Recheck SDA=21, MISO/MOSI not swapped, 3.3V present.
-6. Hold a bracelet tag flat against the antenna. Expected: `DIAG RFID uid=04A1B2C3…`. Write down each
-   bracelet's UID; these become `Bracelet.rfid` values in the staff app.
-7. **Measure the reading zone (required by the project).** Mark the antenna centre. With the bracelet on
-   a wrist, record the maximum distance at which a UID still prints, both face-on and with the wrist
-   rotated 45° and 90°. Typical RC522 range is only a few centimetres. Mount the antenna where the
-   natural wrist path into the tray passes through that measured zone. One RC522 marks one local
-   zone; it never covers the whole shelf.
-
-## Step 2: identify each load cell's wires (cell disconnected)
-
-Wire colours are **not universal**. Measure resistance between every pair of the four wires (six
-measurements) and write them in a table.
-
-| Pair type | Typical relation |
-|---|---|
-| Excitation pair (E+/E−) | The **input** resistance, usually the highest or equal-highest reading (for example about 1000–1100 Ω on a 1 kΩ cell) |
-| Signal pair (A+/A−) | The **output** resistance, similar to or slightly below the input reading |
-| Mixed pairs (one E, one A) | About ¾ of the bridge value; four equal readings |
-
-1. The two pairs that are *not* the 4 equal mixed readings are excitation and signal. If the datasheet
-   gives input and output resistance, match them. The common colour code (red E+, black E−, white A−,
-   green A+) is only a starting guess to confirm with the meter and datasheet.
-2. Polarity of E+/E−: either way works electrically. Polarity of A+/A−: if loading the cell gives a
-   *decreasing* raw count, swap A+ and A− (or accept a negative calibration scale; both work with
-   explicit calibration, but be consistent).
-3. Label each wire with tape: `E+`, `E−`, `A+`, `A−`.
-
-## Step 3: tray A (HX711 A + cell A)
-
-1. Mechanical: bolt the load cell to the rigid base at its fixed end and the tray to its free end,
-   following the arrow on the cell (force direction). Use spacers so the cell can flex. Leave a gap so
-   the tray touches nothing else: not the shelf walls, not tray B, not cables.
-2. Cell to HX711 A: `E+`→E+, `E−`→E−, `A+`→A+, `A−`→A−. Leave B+/B− empty. Twist the four wires
-   together and keep them away from the Wi-Fi antenna and servo wiring.
-3. HX711 A to controller (power off): GND (black) → VCC to 3V3 (red) → DT to 32 → SCK to 33.
-4. Meter, power off: HX711 VCC to GND **no beep**. Controller GND to HX711 GND **beeps**.
-5. Power on. Measure HX711 VCC to GND: **3.2–3.4 V**. Measure E+ to E−: a steady DC voltage (on
-   3.3 V-supplied boards this is near the supply; record it). 0 V → check the module's power path.
-6. Monitor: `tray-a=<number>` with no `(NO_DATA)`. Empty-tray value should vary by only a few hundred
-   counts at most.
-7. Press the tray gently with a finger. The number moves a lot and returns when released. Note the
-   direction: if it decreases under load, swap A+/A− now (step 2.2).
-8. Place the reference mass at the tray centre, then near each corner. Raw changes should be similar at
-   all positions. A large difference means the tray is binding or touching something.
-
-## Step 4: tray B (HX711 B + cell B)
-
-Repeat step 3 with DT to **25** and SCK to **26**. Then check for **cross-talk**: put a mass on tray A
-only. `tray-b` must not change beyond its normal noise, and the reverse must hold too.
-
-## Step 5: calibration (explicit, versioned)
-
-The firmware never tares automatically. For each tray:
-
-1. Empty tray. Wait 10 s. Record the stable raw value as `zero_raw`.
-2. Place the known mass (for example 500 g). Wait 10 s. Record `mass_raw`.
-3. In the staff app go to **Calibration**, enter `zero_raw`, `mass_raw`, `known_mass_g` and a **new**
-   version string (for example `tray-a-2026-10-12-1`). The backend sends the `CALIBRATE` command over
-   MQTT; the firmware refuses a repeated version string.
-4. Verify with a *different* mass. The reported filtered grams should match within the noise you
-   measured. Record noise, drift over 30 minutes and the results in `docs/validation.md`.
-5. Weigh 5 or more real units of each demo SKU separately and enter them in the product's sample
-   weights. The catalogue stores the measured mean, spread and tolerance. Do not invent unit weights.
-
-## Step 6: join the network
-
-Fill `secrets.h` with Wi-Fi, `MQTT_HOST` (the laptop's LAN IP), `MQTT_PASSWORD` and `DEVICE_KEY`
-(matching the backend), re-flash, and confirm `wifi=up mqtt=up`. HEALTH, WEIGHT and RFID events then
-appear in Staff → Device health.
-
-## Power arrangement for the finished shelf
+## LCD wiring through the level shifter
 
 ```text
- 5 V ≥ 2 A supply A ── camera board 5V / GND             (camera only)
- laptop USB or 5 V ≥ 1 A supply B ── sensor ESP32 USB  (powers RC522 + both HX711 from its 3V3 pin)
- All GNDs that share a signal must be common. The camera shares no signal wire with the sensor
- controller (both talk over Wi-Fi), so the two supplies need not be joined.
- Never feed USB and the 5V/VIN pin of the same board from two sources at once.
+ESP32 3V3 ── LV        level shifter        HV ── ESP32 VIN (USB 5 V)
+ESP32 GND ── GND  ──────────────────────── GND ── LCD GND
+ESP32 D16 ── LV1                           HV1 ── LCD SDA
+ESP32 D17 ── LV2                           HV2 ── LCD SCL
+                                    LCD VCC ── ESP32 VIN (5 V)
 ```
+- The LCD backpack runs at 5 V and pulls SDA/SCL up to 5 V. **5 V must never reach an ESP32 pin**, so the shifter
+  sits in between.
+- **True 3.3 V LCD:** wire SDA→D16, SCL→D17 and VCC→3V3 directly, with no shifter.
+- Contrast: turn the small blue trimmer on the backpack until the characters appear.
+
+## Wiring diagram (one box)
+
+```text
+                       ESP32 DEVKIT V1 (sensor; USB to laptop)
+   3V3  GND  D32 D33  D25 D26  D34 D27  D21 D18 D23 D19 D22  D16 D17  D13 D14  VIN
+    │    │    │   │    │   │    │   │    └── RC522 ──────┘   │   │    │   │    │
+    │    │    HX711 A  HX711 B  HX711 C                   level shifter  │   │   LCD 5V
+    │    │    E± A± ── cell A   cell B   cell C           ── LCD SDA/SCL │   │
+    └────┴── 3V3 / GND to every HX711 + RC522 + shifter LV          PAGE  ACTION (to GND)
+```
+
+## Mechanical (tripod)
+- Spread A, B and C as wide as the box allows. Items must sit **inside the triangle**.
+- Each cell is a cantilever: the fixed end is bolted to a block on the base with nothing under the middle, and the
+  free end carries the box through a small spacer. All three flex **downward**.
+- Shim the spacers so the box sits level and **all three cells read a load when the box is empty**.
+- Use an overload stop screw about 1 mm under each corner.
+- Measure where each cell's free-end support point is, in mm from one corner of the box. These numbers become the
+  tray **geometry** (see Step 6).
+
+## Step 0: prepare and flash (no modules attached)
+1. Remove the programmer wires and the EN jumper.
+2. Create `firmware\shelf-controller\include\secrets.h` from `firmware\common\Secrets.example.h`. Wi-Fi is optional for
+   bench bring-up.
+3. Flash the firmware and initialise the event-queue filesystem once:
+   ```powershell
+   .\.venv\Scripts\pio.exe run -d firmware\shelf-controller -e devkitc-v4-proposed -t upload --upload-port COM3
+   .\.venv\Scripts\pio.exe run -d firmware\shelf-controller -e devkitc-v4-proposed -t uploadfs --upload-port COM3
+   ```
+   If the board reboots with `Brownout detector was triggered`, fit the capacitor first. For bench checks only, use
+   the `devkitc-v4-offline` build, which runs with Wi-Fi off.
+4. Monitor at 115200. Each second it prints:
+   `DIAG raw A=… B=… C=… total=UNCAL noise=… flags=DISCONNECTED_A,… rc522=0x.. lcd=none svc=0 wifi=… mqtt=… fs=ok`
+
+## Step 1: RC522
+Wire both readers as in the table: SCK/MOSI/MISO/RST are shared, SS is GPIO21 for R1 and GPIO4 for R2.
+Test R1 first, then add R2 with power off. Valid version values vary; `0x00` or `0xFF` means check wiring.
+A tag prints `DIAG RFID reader=R1 uid=…` or `reader=R2`. Firmware alternates the antenna fields.
+Measure each reading zone along the natural wrist path.
+
+## Step 2: identify each load cell's wires
+Measure resistance across all six wire pairs. The excitation pair (E+/E−) and the signal pair (A+/A−) are the two
+pairs that are *not* among the four equal "mixed" readings. Label the wires. Colours are not universal.
+
+## Step 3: HX711 A, then B, then C (one at a time, power off while wiring)
+1. Wire VCC→3V3, GND→GND, DT, SCK as in the table. Connect the cell: E+→E+, E−→E−, A+→A+, A−→A−. Leave B± empty.
+2. Meter with power off: HX711 VCC–GND must not beep.
+3. Power on: VCC reads 3.2–3.4 V. In `DIAG`, that cell's `raw` value moves when you press above it, and its
+   `DISCONNECTED_x` flag disappears.
+4. Place the known mass near A, then B, then C: the load split should change with position. A rigid tripod tray
+   normally loads several cells together. If a raw reading goes **down** under load, calibration can take the
+   polarity into account. Ensure the tray does not touch any support outside its three intended load paths.
+
+## Step 4: LCD and buttons
+1. Wire the level shifter and LCD as above, then the two buttons to D13/D14 and GND.
+2. On power-up the LCD shows `ShelfFlow sensor`, and `DIAG` shows `lcd=ok`. `lcd=none` means: check the shifter, the
+   5 V supply, the contrast trimmer, and the address (0x27 or 0x3F).
+3. **PAGE** (short press) cycles six pages:
+
+| Page | Line 1 | Line 2 |
+|---|---|---|
+| 1 | `tray-a 1234.5g` (or `UNCALIB`) | `STABLE +-0.6` / `SETTLING` / fault flags |
+| 2 | grams on A and B | grams on C |
+| 3 | raw A and B (thousands) | raw C |
+| 4 | IP address or `WiFi down` | MQTT state, `NOFS` if the queue filesystem is missing |
+| 5 | last RFID tag | UID and seconds ago |
+| 6 | calibration version | geometry version or `geo NOT SET` |
+
+**ACTION** (short press) in normal mode only toggles the backlight. It changes nothing in the store.
+
+## Step 5: on-shelf calibration (staff service mode)
+Three cells need three scales. The firmware solves them exactly from three placements of one known mass.
+
+1. Set the **actual measured known mass**. The default is 500 g; it can be changed from the backend with a `CONFIG`
+   command. In `devkitc-v4-rfid-diagnostic` (USB bench build, Wi-Fi off), send `mass 70` with Newline for a 70 g mass,
+   then `calstatus`. Wait for `CAL known mass saved: 70.000 g` and status `mass_g=70.000` before capturing readings.
+   This persists the reference mass, not the calibration itself. `mass` is refused after a calibration capture
+   sequence has begun; press PAGE to cancel back to service home before changing it.
+2. **Enter service mode:** hold **PAGE + ACTION together for 3 s**. The LCD shows `SERVICE ACT:cal`. While in service
+   mode no weight events are produced, and HEALTH reports `SERVICE_MODE`.
+3. Press **ACTION**: `EMPTY BOX ACT`. Empty the box, then short-press **ACTION** once and release it. The LCD shows
+   `WAIT HANDS OFF`; capture happens only after both buttons are released and the sensors stay healthy and still
+   for one second. This avoids treating the button press itself as tray motion. Wait for `MASS ON A ACT` before
+   placing the mass. A request times out after 20 seconds without a stable window; press ACTION to retry.
+4. `MASS ON A ACT`: put the mass **near cell A**, short-press ACTION once, release it and remove your hand.
+   Leave the mass there until the display advances to B. Repeat for **B** and **C**, moving the same mass each time.
+   Exact positions don't matter, but the three must be clearly different. If they're too similar the LCD shows
+   `FAIL SPREAD MASSES` and starts again at zero.
+5. `VERIFY HOLD ACT`: the LCD shows the live total with the new calibration. Put the mass **anywhere**, for example the
+   centre. It should read close to the known mass at every position. Leave the mass on the tray, wait for still
+   readings, and **hold ACTION for 1.5 s**, then release it to request saving. Keep the mass still while the
+   controller waits for one second of stable hands-off readings. Save is refused if readings are unhealthy/unstable or the
+   verification total differs by more than max(2 g, 3%) from the known mass. Check the empty reading and other
+   masses separately afterward; this save guard is not a measured accuracy specification.
+6. The LCD shows `SAVED` and the new version (`dev-<boot>-<n>`). The firmware stores it and sends a **CALIBRATION**
+   event. The backend records it in the audit trail and switches the tray to that version, so events on the old
+   version are refused.
+7. **Exit:** hold PAGE + ACTION for 3 s again, or wait 2 minutes without touching a button. If the box contents differ
+   from before service mode, that change is still reported, flagged `AFTER_SERVICE`, and goes to staff review. It is
+   never zeroed away.
+
+PAGE (short press) during service mode cancels back to `SERVICE ACT:cal`. Alternatively, staff can send per-cell
+calibration from the backend: `POST /staff/trays/tray-a/calibration` with `cells: [{name, zero_raw, counts_per_g}]`.
+
+## Step 6: geometry (enables the position signal)
+Measure each cell's support point in mm, in one frame for the whole box (origin at a box corner), then send:
+```text
+POST /staff/trays/tray-a/geometry
+{"version": "g1", "reason": "measured supports",
+ "cells": [{"name":"A","x_mm":20,"y_mm":20}, {"name":"B","x_mm":230,"y_mm":20}, {"name":"C","x_mm":125,"y_mm":180}]}
+```
+The backend refuses support points that lie nearly in a line. From then on every settled weight change carries
+`position_mm`, the place on the box where the change happened.
+- **Loading:** each item's position is stored with it.
+- **Pickup:** the system checks that the matched item was at the place the weight left from. A mismatch raises
+  `POSITION_CONFLICT`. Two items of almost equal weight are told apart by position.
+
+Until geometry is set, no position is reported. The LCD's last page shows `geo NOT SET`.
+
+**Check:** with the mass at a known spot, the reported position should land within about 1–2 cm. The backend's
+starting tolerance is 30 mm; tighten it once measured.
+
+## Power
+- Laptop USB powers the ESP. Its 3V3 pin feeds the three HX711s, the RC522 and the shifter's LV side (roughly 40 mA).
+  VIN (USB 5 V) feeds the LCD and the shifter's HV side.
+- One shared GND for everything. Use a short strip next to the ESP rather than the long breadboard rails.
+- The camera has its own 5 V supply and shares no wires with this controller.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `rc522_version=0x00` / `0xFF` | SPI wiring (SDA=21, SCK=18, MOSI=23, MISO=19), 3.3 V present, module not 5 V-only |
-| RC522 version OK, no UID | Tag type must be 13.56 MHz MIFARE/NTAG; hold flat and close; metal behind the antenna detunes it |
-| `tray-x … (NO_DATA)` | DT/SCK swapped or wrong GPIO, HX711 not powered |
-| Raw value pinned at 8388607 or −8388608 | Signal saturated: A+/A− or E+/E− miswired, or the cell is overloaded |
-| Raw noise thousands of counts | Loose terminals, untwisted leads, tray touching neighbours, noisy USB supply |
-| Weight depends on where the item sits | Mechanical binding; fix the mounting before calibrating |
-| Load on A changes B | Trays or cables touching; packaging bridging trays |
+| `DISCONNECTED_x` | That HX711's DT/SCK swapped or on the wrong GPIO, or it has no power |
+| `SATURATED_x` / raw pinned near ±8388607 | Cell miswired (E/A pairs mixed up) or overloaded |
+| One cell changes when pressing above another | Box touching something, cell mount binding, base not stiff |
+| Calibration `FAIL SPREAD MASSES` | The three placements were too close together; move the mass right next to each cell |
+| Verify total varies with position | Base flexing, cells not all loaded at rest (re-shim), or an item outside the triangle |
+| `lcd=none` | Level shifter LV/HV swapped, LCD not on 5 V, contrast trimmer, I2C address |
+| Brownout reboots | Capacitor on 3V3, direct laptop USB port, short cable |
+
+
+## Brief RFID taps and queue capacity (2026-10-16)
+
+The shelf controller uses a dedicated RF polling task. That task alone owns both
+RC522s after initialization, alternates their antennas, and pushes observations
+into a 64-entry FreeRTOS queue without waiting for filesystem or MQTT operations.
+The main loop persists up to four observations per pass, using the original
+capture time. `captured_ms` and `dispatch_ms` distinguish capture from serial
+notification. A long network reconnect can still delay persistence; RAM is not
+power-loss durable. Flash operations may also briefly pause task execution.
+
+Each reader reports a tag immediately on first observation. A held tag produces
+one presentation event; the same tag rearms after 600 ms without successful
+observation. A different UID and the same UID at the other reader are independent.
+There is no one-second reporting cooldown. This release debounce is not a promise
+that arbitrarily brief fly-by movements will be captured: verify realistic taps
+on the physical antennas. An RF dropout longer than 600 ms can also rearm a held tag.
+
+The durable event queue holds up to 256 files, with a free-space guard; it does
+not overwrite unacknowledged events. Capacity is event count, not shopping-item
+count. A seven-item session with 14 RFID presentations and weight-change events
+fits comfortably when space is available. Queue depth is counted at boot and
+maintained on successful writes/ACKs instead of scanning every file on each tap.
+A separate memory buffer keeps up to 64 pending RFID presentation events.
+
+Diagnostics show `durable`, `ram`, `scan_gap_max_ms`, and historical overflow.
+Cached reader version bytes in DIAG are startup values, not continuous bus tests.
+Overflow/write failure remains explicit; old overflow history is not silently
+reset. A full-flash backup before this update preserves calibration, queue and
+previous firmware locally in `data/hardware-backups/`. Ordinary application
+uploads do not format LittleFS or erase NVS. No filesystem upload is needed.
+
+Native policy regression test (MSYS2 g++):
+
+```powershell
+g++ -std=c++11 -Wall -Wextra -Werror firmware/shelf-controller/tests/rfid_tap_test.cpp -o data/hardware-backups/rfid-tap-test.exe
+.\data\hardware-backups\rfid-tap-test.exe
+```
+
+Hardware acceptance: tap R1 seven times, then R2 seven times, moving the tag
+fully away for at least one second between taps. Compare all 14 physical
+presentations with captured events and inspect scan gaps, dispatch delay, queue
+growth and overflow. Test a held tag separately: it should not repeatedly fill
+the queue. Retest during sensor changes and, before deployment, network outages.
+
+
+The offline RFID diagnostic build accepts USB command `bencharchive` after a
+verified full-flash host backup. It moves retired bench-test files into
+`/bench-archive/` on flash and records the previous overflow count before starting
+a fresh active queue. It never formats storage or changes the `box` calibration
+namespace. Partial failures leave remaining active files and failure history
+visible. This command is absent from online shopping builds and must not be used
+to conceal lost customer transactions.
+
+
+Queue filenames now omit the device prefix: `<boot>-<sequence>.json` is at most
+32 characters, including a 16-character boot ID and a 10-digit sequence. The
+complete globally unique event ID remains in JSON. Durable ACKs accept both the
+old full filenames and the new compact filenames. This avoids rename failures
+when a filesystem formatted with a 32-character name limit reaches longer
+sequence numbers. Writes serialize to a single buffer and check byte count.
+
+Offline USB command `queuetest` writes and reads back 14 explicitly marked bench
+HEALTH probes, including sequences across 99/100. It is not a physical RFID test
+or a customer transaction. Archive probes after verifying reboot persistence.

@@ -1,5 +1,12 @@
 # Hardware and wiring — proposed, not physically validated
 
+**Current update, 15 October 2026:** two RC522 shelf readers share the sensor ESP32
+SPI bus, with chip selects GPIO21 (R1) and GPIO4 (R2). A **new separate 38-pin ESP32
+programs the ESP32-S CAM**. See [the current connection tables](dual-rc522-and-38pin-programmer.md),
+which supersede the older one-reader board-role descriptions below. The user has
+reported a successful OV3660 initialization and 640x480 JPEG, with 4 MB flash and
+4 MB PSRAM; the new programmer and complete shelf wiring remain to be tested.
+
 ## Confirmed and missing facts
 
 Confirmed: **exactly one OV3660 camera sensor and an RC522 reader**. User reported the camera module marking “ESP32S”, ID “28clpesp32s”, and clarified that a normal ESP32 is used as a programmer; its module/PCB revision remains unconfirmed. The marking has not been matched to a carrier schematic. Unknown: camera carrier model/revision, exact controller PCB revision, schematic, pin map, PSRAM and flash capacities, lens and regulator capability. Do not connect a guessed camera pin map. The camera diagnostic firmware deliberately drives no camera pins.
@@ -16,8 +23,11 @@ Reported as owned (12 Oct 2026): camera board + OV3660, one ordinary ESP32 (prog
 | 1 existing | ESP32 camera + OV3660 | Exact carrier, PSRAM, lens and pins to be confirmed |
 | 1 additional | Sensor ESP32 DevKitC V4 WROOM-32 | Separate SPI RFID + two HX711 controller |
 | 1 additional | Gate ESP32 DevKitC V4 WROOM-32 | Demonstration mechanism and feedback |
-| 2 | Four-wire full-bridge load cells | Capacity above stocked tray mass, matching mounting mechanics |
-| 2 | HX711 modules | Verify 3.3V digital interface and analog excitation supply |
+| 3 per box | Four-wire full-bridge load cells (tripod) | Each rated for the full loaded box; see sensor-controller-bringup.md |
+| 3 per box | HX711 modules | One per cell; 3.3 V supply so DT stays at 3.3 V |
+| 1 | 16x2 LCD + PCF8574 I2C backpack | On GPIO16/17 (not 21/22) |
+| 1 | Bi-directional I2C level shifter (BSS138) | Required for 5 V LCD backpacks |
+| 2 | Push buttons (staff service, inside enclosure) | GPIO13/14 to GND; never customer controls |
 | 1 shelf + 1 gate | RC522 modules | Provisional 3.3V SPI; one shelf reader covers only its measured wrist zone |
 | 4 demo | Passive RFID bracelets | Unique measured UIDs plus rigid printable marker faces |
 | 1 demo | SG90-class servo | Selected demo class, actual current/torque/travel must be measured |
@@ -33,6 +43,8 @@ Reported as owned (12 Oct 2026): camera board + OV3660, one ordinary ESP32 (prog
 Passive bracelet identifiers are not secure credentials. Multiple marker faces use different IDs mapped to the same bracelet. Keep black/white contrast, quiet border, rigid face and wrist orientation visible.
 
 ## Proposed separate sensor wiring
+
+**Superseded for the tripod box:** the current pin map (3 cells on 32/33, 25/26, 34/27; LCD on 16/17; buttons on 13/14) is in [sensor-controller-bringup.md](sensor-controller-bringup.md). The table below is the original two-tray proposal.
 
 | Controller GPIO | Module signal | Notes |
 |---|---|---|
