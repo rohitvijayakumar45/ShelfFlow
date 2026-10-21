@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "staff",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["../node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "5174"],
+      "cwd": "apps/staff",
+      "port": 5174
+    }
+  ]
+}

@@ -134,9 +134,9 @@ class Capture:
 
 class MjpegStream:
     """Reads multipart/x-mixed-replace JPEG parts with per-part ShelfFlow headers."""
-    def __init__(self, client, url, token, max_part=4 * 1024 * 1024):
+    def __init__(self, client, url, token, max_part=4 * 1024 * 1024, timeout=3):
         self.max_part = max_part
-        self.context = client.stream("GET", url, headers={"X-Camera-Key": token}, timeout=httpx.Timeout(3, read=3))
+        self.context = client.stream("GET", url, headers={"X-Camera-Key": token}, timeout=httpx.Timeout(timeout))
         self.response = self.context.__enter__()
         self.response.raise_for_status()
         if not self.response.headers.get("content-type", "").startswith("multipart/x-mixed-replace"):

@@ -1,3 +1,15 @@
+# Current hardware integration — 16 October 2026
+
+The current setup uses one tray with three load cells (saved calibration `dev-ddc308-1`, 273 g), two RC522 readers and an OV3660 camera with 4 MB PSRAM. A three-product pilot detector/gallery exists for Sanitizer, Vicks and Sunscreen. The main controller now forwards durable USB events to the hardware-mode backend, which acknowledges only after commit. The customer and staff apps use a separate local integration database. See [runbook](local-hardware-integration.md).
+
+Latest automated suite: **130 passed**, with one test-client deprecation warning. Customer/staff TypeScript checks and production builds passed. The USB firmware compiled and was uploaded; live controller health, queue drain, saved calibration ingestion and catalogue prices were checked. The camera network is being changed to Yeti; live video must be verified after reconnecting.
+
+These checks do not establish automatic shopper ownership, general unknown-object recognition, production payment, or full physical shopping accuracy. Stock must be loaded from real item measurements before reviewing pickups/returns. Physical attribution remains staff-reviewed.
+
+---
+
+The following is the historical 9–12 October audit; statements about absent hardware/models describe that earlier state.
+
 # Implementation and validation status — 9–10 October 2026 (audited 12 October 2026)
 
 Audit of 12 October: see [audit-2026-10-12.md](audit-2026-10-12.md) for the requirement matrix, fixed defects (flush-barrier ordering, queue order, Mode B switching) and open items. Suite now **68 passed**. New camera environments `esp32cam-identify` and `esp32cam-pinmap-probe` compile; the camera pin map is a candidate until the probe reports `PROBE_PASS pid=0x3660` on the physical board.
