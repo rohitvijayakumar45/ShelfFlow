@@ -845,3 +845,211 @@ label.inline {
   color: #9a5b00;
   font-weight: 600;
 }
+/* Live shelf map (tripod trays) */
+.shelfmap {
+  margin: 16px 0 0;
+}
+.shelfmap svg {
+  width: 100%;
+  max-height: 260px;
+  background: #f8faf6;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.mapplate {
+  fill: #edf2e9;
+  stroke: #9db5a2;
+  stroke-width: 2;
+}
+.mapcell {
+  fill: white;
+  stroke: var(--green);
+  stroke-width: 2;
+}
+.maplabel {
+  font-size: 12px;
+  fill: var(--muted);
+  text-anchor: middle;
+}
+.mapunit {
+  stroke: white;
+  stroke-width: 2;
+}
+.shelfmap figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+}
+/* Evidence player */
+.evidenceplayer {
+  margin-top: 16px;
+}
+.framebox {
+  position: relative;
+  max-width: 100%;
+}
+.framebox img {
+  display: block;
+  max-width: 100%;
+  border-radius: 7px;
+}
+.framebox .overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.ovroi {
+  fill: none;
+  stroke: white;
+  stroke-dasharray: 6 4;
+  stroke-width: 2;
+}
+.ovitem {
+  fill: none;
+  stroke: #2fbf71;
+  stroke-width: 3;
+}
+.ovhand {
+  fill: rgba(255, 153, 0, 0.12);
+  stroke: #ff9900;
+  stroke-width: 3;
+}
+.ovmarker {
+  fill: none;
+  stroke: #3a7bff;
+  stroke-width: 3;
+}
+.ovtext {
+  fill: white;
+  font-size: 14px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.7);
+  stroke-width: 3px;
+}
+.playerbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+.playerbar input {
+  flex: 1;
+}
+.weightchart {
+  width: 100%;
+  height: auto;
+  background: #f8faf6;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.chartwindow {
+  fill: #e3eee6;
+}
+.chartline {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2;
+}
+.charttext {
+  font-size: 11px;
+  fill: #20372f;
+}
+.charttap {
+  stroke: #3a7bff;
+  stroke-width: 2;
+}
+.chartcursor {
+  stroke: #b5651d;
+  stroke-width: 1.5;
+}
+.why {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+/* Active learning cards */
+.askcard {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px;
+  background: white;
+}
+.refgrid figcaption.askactions {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.askactions button {
+  padding: 8px 10px;
+}
+/* Customer extras */
+.productthumb {
+  width: 54px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+}
+.cartrow .empty-photo {
+  width: 54px;
+  height: 60px;
+  font-size: 10px;
+}
+.toasts {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 20;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: 480px;
+  width: 100%;
+  justify-content: space-between;
+  background: #20372f;
+  color: white;
+  padding: 12px 16px;
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.toast .textbutton {
+  color: #cfe8d7;
+}
+.exitsummary > svg {
+  color: var(--green);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .toast {
+    animation: toastin 180ms ease-out;
+  }
+  @keyframes toastin {
+    from {
+      transform: translateY(12px);
+      opacity: 0;
+    }
+  }
+}

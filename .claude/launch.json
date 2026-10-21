@@ -4,9 +4,28 @@
     {
       "name": "staff",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["../node_modules/vite/bin/vite.js", "--host", "127.0.0.1", "--port", "5174"],
+      "runtimeArgs": [
+        "../node_modules/vite/bin/vite.js",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5174"
+      ],
       "cwd": "apps/staff",
       "port": 5174
+    },
+    {
+      "name": "customer",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "../node_modules/vite/bin/vite.js",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5173"
+      ],
+      "cwd": "apps/customer",
+      "port": 5173
     }
   ]
 }

@@ -16,8 +16,10 @@ import {
   QrCode,
   Scales,
   Sparkle,
+  ChartLine,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
+import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
 
 function Brand() {
   return (
@@ -150,7 +152,10 @@ export function Customer() {
     [error, setError] = useState(""),
     [qr, setQr] = useState<{ token: string; expires_in: number } | null>(null),
     [busy, setBusy] = useState(false),
-    [tab, setTab] = useState("cart");
+    [tab, setTab] = useState("cart"),
+    [disputeFor, setDisputeFor] = useState("");
+  const [toasts, dismissToast] = useCartToasts(cart?.confirmed_events);
+  const disputeBox = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     if (!token) return;
     let stop = false,
@@ -381,6 +386,30 @@ export function Customer() {
                 </p>
               )}
             </section>
+          ) : cart.status === "COMPLETE" ? (
+            <section className="panel exitsummary">
+              <CheckCircle size={36} />
+              <h2>Thanks for shopping with us.</h2>
+              <p>Your simulated payment is complete. Please drop your bracelet at the gate on the way out.</p>
+              {(cart.receipt?.items || []).map((i: any) => (
+                <div className="cartrow" key={i.product_id}>
+                  <ProductThumb productId={i.product_id} token={token} hasImage={cart.items.find((c) => c.product_id === i.product_id)?.has_image ?? true} />
+                  <div>
+                    <h3>{i.name}</h3>
+                    <span className="muted">{money(i.price_minor)} each</span>
+                  </div>
+                  <span className="quantity">× {i.quantity}</span>
+                  <b>{money(i.quantity * i.price_minor)}</b>
+                </div>
+              ))}
+              <div className="row">
+                <b>Total paid (simulated)</b>
+                <b>{money(cart.receipt?.total_minor || 0)}</b>
+              </div>
+              <p className="muted">
+                Something wrong? Use “Dispute a confirmed interaction” within this visit, or ask staff. Order {cart.receipt?.order_id?.slice(0, 8)}.
+              </p>
+            </section>
           ) : (
             <section className="panel cart">
               <div className="sectionhead">
@@ -392,9 +421,7 @@ export function Customer() {
               {cart.items.length ? (
                 cart.items.map((i) => (
                   <div className="cartrow" key={i.product_id}>
-                    <div className="producticon">
-                      <ShoppingBag size={30} />
-                    </div>
+                    <ProductThumb productId={i.product_id} token={token} hasImage={i.has_image} />
                     <div>
                       <h3>{i.name}</h3>
                       <span className="muted">
@@ -481,15 +508,38 @@ export function Customer() {
           <button className="textbutton" onClick={() => setTab("receipt")}>
             View receipt
           </button>
-          <details>
+          <details ref={disputeBox}>
             <summary>Dispute a confirmed interaction</summary>
             <Dispute
+              key={disputeFor}
               token={token}
+              preselect={disputeFor}
               onDone={() => action(async () => {})}
               events={cart?.confirmed_events || []}
             />
           </details>
         </aside>
+      </div>
+      <div className="toasts" aria-live="polite">
+        {toasts.map((t) => (
+          <div className="toast" key={t.id}>
+            <span>
+              {t.action === "RETURN" ? "Put back" : "Added"}: <b>{t.name || t.product_id}</b>
+              {t.quantity > 1 ? ` × ${t.quantity}` : ""}
+            </span>
+            <button
+              className="textbutton"
+              onClick={() => {
+                setDisputeFor(t.id);
+                if (disputeBox.current) disputeBox.current.open = true;
+                disputeBox.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                dismissToast(t.id);
+              }}
+            >
+              Not mine?
+            </button>
+          </div>
+        ))}
       </div>
       <footer>
         ShelfFlow prototype <span>Continuous sensing · No shelf taps</span>
@@ -501,12 +551,14 @@ function Dispute({
   token,
   onDone,
   events,
+  preselect = "",
 }: {
   token: string;
   onDone: () => void;
   events: any[];
+  preselect?: string;
 }) {
-  const [id, setId] = useState(""),
+  const [id, setId] = useState(preselect),
     [reason, setReason] = useState(""),
     [error, setError] = useState("");
   return (
@@ -527,7 +579,8 @@ function Dispute({
           <option value="">Choose item interaction</option>
           {events.map((e) => (
             <option key={e.id} value={e.id}>
-              {e.action} · {e.product_id} × {e.quantity}
+              {e.action === "RETURN" ? "Put back" : "Picked up"} · {e.name || e.product_id} × {e.quantity}
+              {e.at ? ` · ${new Date(e.at * 1000).toLocaleTimeString()}` : ""}
             </option>
           ))}
         </select>
@@ -554,6 +607,7 @@ const nav = [
   ["Tray loading", Scales],
   ["Products & recognition", Sparkle],
   ["Evidence review", Camera],
+  ["Insights", ChartLine],
   ["Sessions & receipts", Users],
 ] as const;
 export function Staff() {
@@ -697,7 +751,7 @@ export function Staff() {
                       </strong>
                     </div>
                   </div>
-                  <OverviewAlerts data={data} pending={pending} />
+                  <OverviewAlerts data={data} pending={pending} token={token} />
                   <div className="overviewgrid">
                     <section className="panel">
                       <div className="sectionhead">
@@ -727,10 +781,9 @@ export function Staff() {
                           </b>
                         </div>
                       ))}
-                      <Notice>
-                        No live shelf images connected yet. Configure the camera
-                        and validate visibility before physical testing.
-                      </Notice>
+                      {data.trays.filter((t: any) => t.unit_tracking).map((t: any) => (
+                        <ShelfMap key={t.id} tray={t} units={data.tray_units} products={data.products} />
+                      ))}
                     </section>
                     <section className="panel">
                       <h2>Device health</h2>
@@ -853,8 +906,12 @@ export function Staff() {
                 <TrayLoading data={data} action={action} token={token} />
               )}
               {page === "Products & recognition" && (
-                <ProductsRecognition data={data} action={action} token={token} />
+                <>
+                  <HelpTheCamera data={data} token={token} />
+                  <ProductsRecognition data={data} action={action} token={token} />
+                </>
               )}
+              {page === "Insights" && <Insights data={data} action={action} token={token} />}
               {page === "Evidence review" && (
                 <section className="panel">
                   <h2>Pending evidence</h2>
@@ -1497,7 +1554,7 @@ function ReviewCard({
       </button>
       {evidence && (
         <>
-          <EvidenceGallery refs={evidence.references} token={token} />
+          <EvidencePlayer eventId={h.event_id} token={token} />
           <p className="muted">
             Model: {evidence.model_status} · clock uncertainty{" "}
             {evidence.clock_uncertainty_ms} ms · weight{" "}
@@ -1511,6 +1568,17 @@ function ReviewCard({
           </details>
         </>
       )}
+      <Suggestion
+        hypothesisId={h.id}
+        token={token}
+        onUse={(s) => {
+          if (s.session_id) setSid(s.session_id);
+          if (s.unit_ids?.length) setUnits(s.unit_ids);
+          setQty(s.quantity || 1);
+          setReason("Checked suggestion: " + s.why.join(" ").slice(0, 400));
+          if (!evidence) call(`/staff/evidence/${h.event_id}`, token).then(setEvidence).catch(() => {});
+        }}
+      />
       <label>
         Attributed session
         <select value={sid} onChange={(e) => setSid(e.target.value)}>
@@ -2211,7 +2279,18 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
   );
 }
 
-function OverviewAlerts({ data, pending }: { data: any; pending: any[] }) {
+function OverviewAlerts({ data, pending, token }: { data: any; pending: any[]; token: string }) {
+  const [drift, setDrift] = useState<any[]>([]),
+    [open, setOpen] = useState(0);
+  useEffect(() => {
+    const load = () => {
+      call("/staff/reports/drift", token).then(setDrift).catch(() => {});
+      call("/staff/uncertain", token).then((r) => setOpen(r.length)).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [token]);
   const reasons = (code: string) => pending.filter((h: any) => (h.reason || []).includes(code)).length;
   const tracked = data.trays.some((t: any) => t.unit_tracking);
   const onShelf = (pid: string) => data.tray_units.filter((u: any) => u.product_id === pid && u.status === "ON_TRAY").length;
@@ -2224,6 +2303,8 @@ function OverviewAlerts({ data, pending }: { data: any; pending: any[] }) {
       alerts.push(`${p.name}: ${onShelf(p.id)} left on the shelf — restock with the tray-loading wizard.`);
   const unlearned = data.tray_units.filter((u: any) => u.status === "ON_TRAY" && (u.reference_status || "").startsWith("FAILED")).length;
   if (unlearned) alerts.push(`${unlearned} loaded item(s) could not be cut out of the camera stills: teach those products in Products & recognition.`);
+  for (const t of drift.filter((t) => t.status !== "OK")) alerts.push(`${t.tray_id}: ${t.advice}`);
+  if (open) alerts.push(`${open} item(s) the camera was unsure about: answer them under Products & recognition → Help the camera.`);
   if (!alerts.length) return null;
   return (
     <section className="panel">

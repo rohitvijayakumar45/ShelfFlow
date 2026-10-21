@@ -39,6 +39,7 @@ export type Cart = {
     name: string;
     quantity: number;
     price_minor: number;
+    has_image?: boolean;
   }[];
   total_minor: number;
   pending: { id: string; tray_id: string; reasons: string[]; status: string }[];
