@@ -15,6 +15,7 @@ import {
   WifiHigh,
   QrCode,
   Scales,
+  Sparkle,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
 
@@ -91,8 +92,8 @@ function Login({
               : "Your shopping cart updates as you browse. Ambiguous interactions go to staff for review."}
           </p>
           <Notice>
-            Demo coverage: two trays, one camera. Pick with the bracelet-wearing
-            hand; hidden markers may need staff review.
+            Shelf camera and weight sensors record changes. Staff review
+            uncertain items and customer attribution before cart changes.
           </Notice>
         </div>
         <form className="panel login" onSubmit={submit}>
@@ -550,6 +551,8 @@ const nav = [
   ["Overview", Storefront],
   ["Gate & bracelets", QrCode],
   ["Shelf setup", Tray],
+  ["Tray loading", Scales],
+  ["Products & recognition", Sparkle],
   ["Evidence review", Camera],
   ["Sessions & receipts", Users],
 ] as const;
@@ -694,6 +697,7 @@ export function Staff() {
                       </strong>
                     </div>
                   </div>
+                  <OverviewAlerts data={data} pending={pending} />
                   <div className="overviewgrid">
                     <section className="panel">
                       <div className="sectionhead">
@@ -710,11 +714,11 @@ export function Staff() {
                           <div>
                             <h3>{t.id}</h3>
                             <p>
-                              {
-                                data.products.find(
-                                  (p: any) => p.id === t.product_id,
-                                )?.name
-                              }
+                              {t.unit_tracking
+                                ? "Mixed products · tracked per item"
+                                : data.products.find(
+                                    (p: any) => p.id === t.product_id,
+                                  )?.name}
                             </p>
                           </div>
                           <b>
@@ -755,13 +759,23 @@ export function Staff() {
                     </section>
                   </div>
                   <section className="panel">
+                    <h2>Recent RFID taps</h2>
+                    {!data.recent_taps?.length && <p className="muted">Tap a registered tag at either reader.</p>}
+                    {data.recent_taps?.slice(0,8).map((tap:any)=>(
+                      <div className="row" key={tap.event_id}>
+                        <span>{tap.reader || "Reader"} · {tap.uid}</span>
+                        <span>{Date.now()/1000-tap.captured<60 ? "Just received" : "Earlier capture"}</span>
+                      </div>
+                    ))}
+                  </section>
+                  {data.mode === "simulation" && <section className="panel">
                     <h2>Simulation bench</h2>
                     <p>
                       These controls generate labelled evidence through device
                       ingestion and fusion. They are staff demo controls.
                     </p>
                     <Simulation data={data} action={action} />
-                  </section>
+                  </section>}
                 </>
               )}
               {page === "Gate & bracelets" && (
@@ -834,6 +848,12 @@ export function Staff() {
               )}
               {page === "Shelf setup" && (
                 <Setup data={data} action={action} token={token} />
+              )}
+              {page === "Tray loading" && (
+                <TrayLoading data={data} action={action} token={token} />
+              )}
+              {page === "Products & recognition" && (
+                <ProductsRecognition data={data} action={action} token={token} />
               )}
               {page === "Evidence review" && (
                 <section className="panel">
@@ -1147,22 +1167,31 @@ function Gate({ data, action }: { token: string; data: any; action: Action }) {
           )}
         </div>
       ))}
-      <details>
-        <summary>Audited manual assignment / fault recovery</summary>
-        <JsonForm
-          label="Assign verified bracelet"
-          initial={{
-            session_id: "",
-            bracelet_id: "B01",
-            actual_uid: "",
-            physical_confirmed: false,
-            reason: "",
-          }}
-          onSubmit={(b) => action("/staff/manual-assignment", b)}
-        />
-      </details>
+      <VerifiedAssignment data={data} action={action} />
     </section>
   );
+}
+function VerifiedAssignment({data,action}:{data:any;action:Action}){
+  const [sid,setSid]=useState(""),[bid,setBid]=useState(""),[uid,setUid]=useState(""),
+    [confirmed,setConfirmed]=useState(false),[reason,setReason]=useState("");
+  const bracelet=data.bracelets.find((b:any)=>b.id===bid);
+  const latest=data.recent_taps?.find((tap:any)=>Date.now()/1000-tap.captured<30);
+  return <div className="panel">
+    <h3>Assign a verified tag</h3>
+    <p>Use this staff-assisted entry while the physical dispenser is unavailable.</p>
+    <label>Customer visit<select value={sid} onChange={e=>setSid(e.target.value)}>
+      <option value="">Choose customer</option>{data.sessions.filter((s:any)=>s.status==="ENTRY").map((s:any)=><option key={s.id} value={s.id}>{s.customer_alias || s.id.slice(0,8)}</option>)}
+    </select></label>
+    <label>Available bracelet<select value={bid} onChange={e=>{setBid(e.target.value);setConfirmed(false);}}>
+      <option value="">Choose cleaned bracelet</option>{data.bracelets.filter((b:any)=>b.clean && b.state==="AVAILABLE").map((b:any)=><option key={b.id} value={b.id}>{b.id} · {b.rfid}</option>)}
+    </select></label>
+    <label>Verified RFID UID<input value={uid} onChange={e=>{setUid(e.target.value.toUpperCase());setConfirmed(false);}} /></label>
+    <button className="secondary" disabled={!latest} onClick={()=>{setUid(latest.uid);setConfirmed(false);}}>Use latest tap</button>
+    <label><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)} /> I checked the tag and issued it to this customer.</label>
+    <label>Assignment note<input value={reason} onChange={e=>setReason(e.target.value)} /></label>
+    <button disabled={!sid || !bracelet || uid!==bracelet.rfid || !confirmed || reason.trim().length<3}
+      onClick={()=>action('/staff/manual-assignment',{session_id:sid,bracelet_id:bid,actual_uid:uid,physical_confirmed:confirmed,reason}).then(()=>{setSid("");setConfirmed(false);setReason("");}).catch(()=>{})}>Assign tag and start visit</button>
+  </div>;
 }
 function Simulation({ data, action }: { data: any; action: Action }) {
   const [sid, setSid] = useState(""),
@@ -1359,7 +1388,7 @@ function Setup({
       {data.trays.map((t: any) => (
         <section className="panel" key={t.id}>
           <h2>
-            {t.id} · {t.product_id}
+            {t.id} · {t.unit_tracking ? "mixed products (load via Tray loading)" : t.product_id}
           </h2>
           {t.latest_sample ? (
             <div className="row">
@@ -1446,7 +1475,11 @@ function ReviewCard({
   const [evidence, setEvidence] = useState<any>(null),
     [sid, setSid] = useState(h.session_id || ""),
     [reason, setReason] = useState(""),
-    [qty, setQty] = useState(h.proposal.quantity || 1);
+    [qty, setQty] = useState(h.proposal.quantity || 1),
+    [units,setUnits]=useState<string[]>(h.proposal.unit_ids || []);
+  const mixed=data.trays.find((t:any)=>t.id===h.tray_id)?.unit_tracking;
+  const eligible=data.tray_units.filter((u:any)=>u.tray_id===h.tray_id &&
+    (h.proposal.action==="RETURN" ? u.status==="IN_CART" && u.session_id===sid : u.status==="ON_TRAY"));
   return (
     <article className="review">
       <h3>
@@ -1503,15 +1536,23 @@ function ReviewCard({
         Evidence-based decision reason
         <input value={reason} onChange={(e) => setReason(e.target.value)} />
       </label>
+      {mixed && <fieldset><legend>Verify the physical items</legend>
+        {eligible.map((u:any)=><label key={u.id}>
+          <input type="checkbox" checked={units.includes(u.id)} onChange={e=>setUnits(e.target.checked?[...units,u.id]:units.filter(id=>id!==u.id))} />
+          {data.products.find((p:any)=>p.id===u.product_id)?.name || u.product_id} · {u.weight_g.toFixed(1)} g · {u.id.slice(0,8)}
+        </label>)}
+        {!eligible.length && <p>No eligible loaded items. Check the customer and tray inventory.</p>}
+      </fieldset>}
       <div className="actions">
         <button
-          disabled={!sid || reason.length < 3}
+          disabled={!sid || reason.length < 3 || (mixed && !units.length)}
           onClick={() =>
             action(`/staff/review/${h.id}`, {
               decision: "CONFIRM",
               session_id: sid,
               quantity: qty,
               reason,
+              ...(mixed ? {unit_ids:units} : {}),
             }).catch(() => {})
           }
         >
@@ -1616,5 +1657,580 @@ function EvidenceGallery({ refs, token }: { refs: string[]; token: string }) {
       )}
       {error && <p className="error">{error}</p>}
     </div>
+  );
+}
+type WeightEvent = {
+  event_id: string;
+  delta_g: number;
+  noise_g: number;
+  capture_end: number;
+  calibration_version: string;
+  sensor_health: { ok: boolean; flags: string[] };
+};
+type Step = "choose" | "waiting" | "review";
+function CatalogueImage({ name, token, alt }: { name: string; token: string; alt: string }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    let stopped = false,
+      made = "";
+    fetch(`/api/staff/catalogue-file/${encodeURIComponent(name)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.blob() : Promise.reject()))
+      .then((blob) => {
+        if (stopped) return;
+        made = URL.createObjectURL(blob);
+        setUrl(made);
+      })
+      .catch(() => {});
+    return () => {
+      stopped = true;
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [name, token]);
+  return url ? <img className="loadphoto" src={url} alt={alt} /> : <div className="loadphoto empty-photo">No image</div>;
+}
+function TrayLoading({ data, action, token }: { data: any; action: Action; token: string }) {
+  const [trayId, setTrayId] = useState(data.trays[0]?.id || ""),
+    [reason, setReason] = useState(""),
+    [step, setStep] = useState<Step>("choose"),
+    [productId, setProductId] = useState(data.products[0]?.id || ""),
+    [spot, setSpot] = useState(""),
+    [since, setSince] = useState(0),
+    [before, setBefore] = useState(""),
+    [after, setAfter] = useState(""),
+    [found, setFound] = useState<WeightEvent | null>(null),
+    [ignored, setIgnored] = useState(""),
+    [camera, setCamera] = useState("unknown"),
+    [simGrams, setSimGrams] = useState(330),
+    [result, setResult] = useState<any>(null),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const tray = data.trays.find((t: any) => t.id === trayId);
+  const load = data.tray_loads.find((l: any) => l.tray_id === trayId && l.status === "OPEN");
+  const product = (id: string) => data.products.find((p: any) => p.id === id)?.name || id;
+  const trayUnits = data.tray_units.filter((u: any) => u.tray_id === trayId);
+  const onTray = trayUnits.filter((u: any) => u.status === "ON_TRAY");
+  const loaded = load ? trayUnits.filter((u: any) => u.load_id === load.id) : [];
+  const usedSpots = new Set(onTray.map((u: any) => u.spot).filter((s: any) => s !== null));
+  const simulation = data.mode === "simulation";
+
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function still(loadId: string) {
+    // A missing camera must not block loading; the unit is then saved without photos.
+    try {
+      const r = await call(`/staff/loads/${loadId}/snapshot`, token, {});
+      setCamera("ok");
+      return r.ref as string;
+    } catch {
+      setCamera("unavailable");
+      return "";
+    }
+  }
+  // Wait for the first settled increase recorded after "place item" was pressed.
+  useEffect(() => {
+    if (step !== "waiting" || !load) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const events: WeightEvent[] = await call(`/staff/trays/${trayId}/weight-events?since=${since}`, token);
+        const fresh = events.filter((e) => e.capture_end >= since);
+        const rising = fresh.find((e) => e.delta_g > 0);
+        const falling = fresh.find((e) => e.delta_g < 0);
+        if (falling) setIgnored(`Weight decreased by ${Math.abs(falling.delta_g).toFixed(1)} g — nothing should be removed while loading.`);
+        if (rising && !stopped) {
+          setFound(rising);
+          setAfter(await still(load.id));
+          setStep("review");
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    };
+    poll();
+    const t = setInterval(poll, 1000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [step, since, trayId, load?.id]);
+
+  function resetItem() {
+    setStep("choose");
+    setFound(null);
+    setBefore("");
+    setAfter("");
+    setIgnored("");
+  }
+  const live = tray?.latest_sample?.weight;
+  return (
+    <>
+      <section className="panel">
+        <div className="sectionhead">
+          <h2>Load a mixed-product tray</h2>
+          <label className="inline">
+            Tray
+            <select value={trayId} onChange={(e) => { setTrayId(e.target.value); resetItem(); setResult(null); }}>
+              {data.trays.map((t: any) => (
+                <option key={t.id} value={t.id}>{t.id}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p>
+          Each item is weighed on its own as you place it: the weight it adds becomes that item's fingerprint, and
+          camera stills are saved with it. Place items one at a time and keep hands off the tray until the weight
+          settles. The scale is never zeroed; each weight is the difference between two stable readings.
+        </p>
+        {error && <p role="alert" className="error">{error}</p>}
+        {!tray ? null : !tray.unit_tracking ? (
+          <div className="wizardstep">
+            <h3>Step 1 · Switch this tray to per-item tracking</h3>
+            {tray.stock > 0 ? (
+              <Notice>
+                {trayId} still counts {tray.stock} items in single-product mode. Empty and reconcile the tray before
+                switching.
+              </Notice>
+            ) : (
+              <>
+                <label>
+                  Audit reason
+                  <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. mixed demo tray" />
+                </label>
+                <button disabled={busy || reason.trim().length < 3}
+                  onClick={() => run(async () => { await action(`/staff/trays/${trayId}/unit-tracking`, { enabled: true, reason }); setReason(""); })}>
+                  Enable per-item tracking
+                </button>
+              </>
+            )}
+          </div>
+        ) : !load ? (
+          <div className="wizardstep">
+            <h3>Step 2 · Start a loading session</h3>
+            <p className="muted">
+              {onTray.length} item{onTray.length === 1 ? "" : "s"} currently on {trayId}. Calibration {tray.calibration_version}.
+            </p>
+            {tray.calibration_version === "UNSET" && (
+              <Notice>Calibrate this tray first (Shelf setup). Weights from an uncalibrated tray are refused.</Notice>
+            )}
+            <label>
+              Audit reason
+              <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. morning restock" />
+            </label>
+            <button disabled={busy || reason.trim().length < 3}
+              onClick={() => run(async () => { await action(`/staff/trays/${trayId}/loads`, { reason }); setReason(""); resetItem(); setResult(null); })}>
+              Start loading
+            </button>
+          </div>
+        ) : (
+          <div className="wizardstep">
+            <h3>Step 3 · Add items one by one</h3>
+            <ol className="steps">
+              <li className={step === "choose" ? "current" : "done"}>Choose product</li>
+              <li className={step === "waiting" ? "current" : step === "review" ? "done" : ""}>Place one item</li>
+              <li className={step === "review" ? "current" : ""}>Check and save</li>
+            </ol>
+            {step === "choose" && (
+              <>
+                <div className="setupgrid">
+                  <label>
+                    Product
+                    <select value={productId} onChange={(e) => setProductId(e.target.value)}>
+                      {data.products.map((p: any) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Spot on tray (optional)
+                    <select value={spot} onChange={(e) => setSpot(e.target.value)}>
+                      <option value="">Not specified</option>
+                      {[0, 1, 2, 3, 4, 5].map((n) => (
+                        <option key={n} value={n} disabled={usedSpots.has(n)}>
+                          Spot {n + 1}{usedSpots.has(n) ? " (occupied)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <button disabled={busy || !productId}
+                  onClick={() => run(async () => {
+                    setResult(null);
+                    setBefore(await still(load.id));
+                    setSince(Date.now() / 1000 - 2);
+                    setStep("waiting");
+                  })}>
+                  Ready — I will place one {product(productId)}
+                </button>
+              </>
+            )}
+            {step === "waiting" && (
+              <div className="waiting">
+                <p className="weightreadout">
+                  <Scales size={28} />
+                  {live?.filtered != null ? `${Number(live.filtered).toFixed(1)} g on tray` : "Waiting for the tray reading…"}
+                </p>
+                <p>
+                  Place <b>one {product(productId)}</b>{spot !== "" ? ` in spot ${Number(spot) + 1}` : ""} now, then take your
+                  hands away. The item is recorded as soon as the weight settles.
+                </p>
+                {ignored && <Notice>{ignored}</Notice>}
+                {simulation && (
+                  <div className="simrow">
+                    <label>
+                      Simulated item weight (g)
+                      <input type="number" step="any" value={simGrams} onChange={(e) => setSimGrams(Number(e.target.value))} />
+                    </label>
+                    <button className="secondary" disabled={busy}
+                      onClick={() => run(async () => { await call("/staff/simulation/weight", token, { tray_id: trayId, delta_g: simGrams }); })}>
+                      Simulate placement
+                    </button>
+                  </div>
+                )}
+                <button className="textbutton" onClick={resetItem}>Cancel this item</button>
+              </div>
+            )}
+            {step === "review" && found && (
+              <div className="review">
+                <div className="metrics">
+                  <div><span>Product</span><strong>{product(productId)}</strong></div>
+                  <div><span>Item weight</span><strong>{found.delta_g.toFixed(1)} g</strong></div>
+                  <div><span>Sensor noise</span><strong>±{Number(found.noise_g).toFixed(1)} g</strong></div>
+                  <div><span>Spot</span><strong>{spot === "" ? "—" : Number(spot) + 1}</strong></div>
+                </div>
+                {!found.sensor_health.ok && <Notice>Sensor reported a fault for this reading. Saving will be refused; redo the placement.</Notice>}
+                {found.calibration_version !== tray.calibration_version && (
+                  <Notice>This reading used calibration {found.calibration_version}, not the tray's {tray.calibration_version}. Saving will be refused.</Notice>
+                )}
+                <div className="photos">
+                  {before ? <CatalogueImage name={before} token={token} alt="Tray before placement" /> : <div className="loadphoto empty-photo">Before: no camera</div>}
+                  {after ? <CatalogueImage name={after} token={token} alt="Tray after placement" /> : <div className="loadphoto empty-photo">After: no camera</div>}
+                </div>
+                {camera === "unavailable" && <p className="muted">Camera unavailable — the item will be saved without photos.</p>}
+                <div className="actions">
+                  <button disabled={busy}
+                    onClick={() => run(async () => {
+                      const r = await action(`/staff/loads/${load.id}/units`, {
+                        product_id: productId,
+                        weight_event_id: found.event_id,
+                        spot: spot === "" ? null : Number(spot),
+                        crop_refs: [before, after].filter(Boolean),
+                      });
+                      setResult({ ...r, product: product(productId) });
+                      setSpot("");
+                      resetItem();
+                    })}>
+                    Save item
+                  </button>
+                  <button className="secondary" disabled={busy} onClick={resetItem}>Redo this item</button>
+                </div>
+              </div>
+            )}
+            {result && (
+              <div className={result.warnings.length ? "result warn" : "result"} role="status">
+                <CheckCircle size={20} /> Saved {result.product} at {result.weight_g.toFixed(1)} g.
+                {result.warnings.map((w: any) => (
+                  <p key={w.unit_id}>
+                    Weight is within {w.difference_g} g of a {product(w.product_id)} on this tray. The scale alone may not
+                    tell them apart; the camera or staff review will decide.
+                  </p>
+                ))}
+              </div>
+            )}
+            <h3>Loaded in this session ({loaded.length})</h3>
+            <UnitTable units={loaded} product={product} action={action} />
+            <button className="secondary" disabled={busy || step !== "choose"}
+              onClick={() => run(async () => { await action(`/staff/loads/${load.id}/close`, {}); resetItem(); setResult(null); })}>
+              Finish loading
+            </button>
+          </div>
+        )}
+      </section>
+      {tray?.unit_tracking && (
+        <section className="panel">
+          <h2>On {trayId} now ({onTray.length})</h2>
+          <UnitTable units={onTray} product={product} action={action} />
+          <p className="muted">
+            Items in carts: {trayUnits.filter((u: any) => u.status === "IN_CART").length}. Removed:{" "}
+            {trayUnits.filter((u: any) => u.status === "REMOVED").length}.
+          </p>
+        </section>
+      )}
+    </>
+  );
+}
+function UnitTable({ units, product, action }: { units: any[]; product: (id: string) => string; action: Action }) {
+  if (!units.length) return <p className="muted">No items yet.</p>;
+  return (
+    <table>
+      <thead>
+        <tr><th>Product</th><th>Weight</th><th>Spot</th><th>Status</th><th>Look learned</th><th></th></tr>
+      </thead>
+      <tbody>
+        {units.map((u) => (
+          <tr key={u.id}>
+            <td>{product(u.product_id)}</td>
+            <td>{u.weight_g.toFixed(1)} g</td>
+            <td>{u.spot === null ? "—" : u.spot + 1}</td>
+            <td>{u.status.replace("_", " ").toLowerCase()}</td>
+            <td>{lookStatus(u.reference_status)}</td>
+            <td>
+              {u.status === "ON_TRAY" && (
+                <button className="textbutton"
+                  onClick={() => {
+                    const reason = prompt("Remove this item from the tray record. Audit reason:");
+                    if (reason) action(`/staff/units/${u.id}/remove`, { reason }).catch(() => {});
+                  }}>
+                  Remove
+                </button>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function lookStatus(status: string | null) {
+  if (!status) return "—";
+  if (status === "DONE") return "✓ learned";
+  if (status === "PENDING") return "learning…";
+  if (status === "NO_STILLS") return "no photo (camera off)";
+  return "✗ " + status.replace("FAILED:", "").replaceAll("_", " ").toLowerCase();
+}
+function ProductsRecognition({ data, action, token }: { data: any; action: Action; token: string }) {
+  const [info, setInfo] = useState<any>(null),
+    [error, setError] = useState(""),
+    [newProduct, setNewProduct] = useState({ product_id: "", name: "", price: "" }),
+    [teachTray, setTeachTray] = useState(data.trays[0]?.id || ""),
+    [seconds, setSeconds] = useState(20),
+    [busy, setBusy] = useState(false),
+    [open, setOpen] = useState<string>("");
+  const load = async () => {
+    try {
+      setInfo(await call("/staff/references", token));
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [token]);
+  async function run(fn: () => Promise<any>) {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const refs: any[] = info?.references || [];
+  const status = info?.gallery_status;
+  const teaching = (info?.teach_sessions || []).find((t: any) => t.status === "ACTIVE" && t.until > Date.now() / 1000);
+  const unitsOf = (pid: string) => data.tray_units.filter((u: any) => u.product_id === pid && u.status === "ON_TRAY").length;
+  const pairs: any[] = status?.pairs || [];
+  const groups: any[] = status?.groups || [];
+  return (
+    <>
+      <section className="panel">
+        <h2>How new products are learned</h2>
+        <p>
+          No retraining and no photo sessions. Every item loaded with the tray-loading wizard is cut out of the camera's
+          before/after stills and becomes a reference automatically. For a brand-new product, use <b>Teach</b>: turn it
+          slowly in front of the camera for ~20 seconds and the system keeps the views that add something new. Reject any
+          reference that shows the wrong thing.
+        </p>
+        <Notice>
+          Vision never charges on its own. Per-item weight and position come first; if the camera disagrees, the event
+          goes to review. A product that was never loaded or taught can be mistaken for a similar-looking one.
+        </Notice>
+        {error && <p role="alert" className="error">{error}</p>}
+      </section>
+      <section className="panel">
+        <div className="sectionhead">
+          <h2>Recognition status</h2>
+          <span className="tag">{status ? status.version : "vision not connected"}</span>
+        </div>
+        {status ? (
+          <>
+            <p className="muted">
+              {status.live_references} live reference{status.live_references === 1 ? "" : "s"} learned on this shelf · updated{" "}
+              {Math.max(0, Math.round(Date.now() / 1000 - status.received))} s ago
+            </p>
+            {pairs.length === 0 ? (
+              <p>No look-alike products: the camera tells every enrolled product apart.</p>
+            ) : (
+              pairs.map((p: any) => {
+                const group = groups.find((g: any) => g.products.includes(p.a));
+                return (
+                  <div key={p.a + p.b} className={group?.usable ? "result" : "result warn"}>
+                    <b>{data.products.find((x: any) => x.id === p.a)?.name || p.a}</b> and{" "}
+                    <b>{data.products.find((x: any) => x.id === p.b)?.name || p.b}</b> look alike (similarity {p.similarity}).
+                    <p>
+                      {group?.usable
+                        ? `A dedicated look-alike check tells them apart (validated ${Math.round(group.cv_accuracy * 100)}% on held-out views).`
+                        : group?.advice || "Rely on weight and position, or keep them on different trays."}
+                    </p>
+                  </div>
+                );
+              })
+            )}
+          </>
+        ) : (
+          <p className="muted">Start the vision service to sync references and report look-alikes.</p>
+        )}
+      </section>
+      <section className="panel">
+        <h2>Add a product</h2>
+        <div className="setupgrid">
+          <label>
+            Product ID (lowercase, e.g. hand-cream)
+            <input value={newProduct.product_id} onChange={(e) => setNewProduct({ ...newProduct, product_id: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") })} />
+          </label>
+          <label>
+            Name
+            <input value={newProduct.name} onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })} />
+          </label>
+          <label>
+            Price (₹)
+            <input type="number" min={0} step="0.01" value={newProduct.price} onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })} />
+          </label>
+        </div>
+        <button
+          disabled={busy || newProduct.product_id.length < 2 || !newProduct.name || newProduct.price === ""}
+          onClick={() =>
+            run(async () => {
+              await action("/staff/catalogue", { product_id: newProduct.product_id, name: newProduct.name, price_minor: Math.round(Number(newProduct.price) * 100) });
+              setNewProduct({ product_id: "", name: "", price: "" });
+            })
+          }
+        >
+          Create product
+        </button>
+        <p className="muted">Then teach it (below) and load units with the tray-loading wizard to record their weights.</p>
+      </section>
+      <section className="panel">
+        <div className="sectionhead">
+          <h2>Catalogue</h2>
+          <label className="inline">
+            Teach on
+            <select value={teachTray} onChange={(e) => setTeachTray(e.target.value)}>
+              {data.trays.map((t: any) => (
+                <option key={t.id} value={t.id}>{t.id}</option>
+              ))}
+            </select>
+            <select value={seconds} onChange={(e) => setSeconds(Number(e.target.value))}>
+              {[10, 20, 30, 45].map((n) => (
+                <option key={n} value={n}>{n} s</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {teaching && (
+          <div className="result" role="status">
+            Teaching <b>{data.products.find((p: any) => p.id === teaching.product_id)?.name}</b>: turn it slowly over the tray —
+            front, back, sides, tilted, in your hand. {teaching.accepted}/{teaching.max_refs} views kept ·{" "}
+            {Math.max(0, Math.round(teaching.until - Date.now() / 1000))} s left.{" "}
+            <button className="textbutton" onClick={() => run(() => action(`/staff/teach/${teaching.id}/stop`, {}))}>Stop</button>
+          </div>
+        )}
+        <table>
+          <thead>
+            <tr><th>Product</th><th>Price</th><th>On shelf</th><th>Weight</th><th>References</th><th></th></tr>
+          </thead>
+          <tbody>
+            {data.products.map((p: any) => {
+              const mine = refs.filter((r) => r.product_id === p.id);
+              const active = mine.filter((r) => r.status === "ACTIVE").length;
+              const enrolled = status?.products?.[p.id] || 0;
+              return (
+                <tr key={p.id}>
+                  <td>{p.name}<br /><small className="muted">{p.id}</small></td>
+                  <td>{money(p.price_minor)}</td>
+                  <td>{unitsOf(p.id)}{data.tray_units.some((u: any) => u.product_id === p.id) && unitsOf(p.id) <= 1 && <small className="lowstock"> low</small>}</td>
+                  <td>{p.weight_source === "MEASURED" && p.unit_g ? `${p.unit_g.toFixed(1)} g` : "not measured"}</td>
+                  <td>
+                    {active} new{enrolled ? ` · ${enrolled} views in gallery` : ""}
+                    {active + enrolled === 0 && <small className="lowstock"> not learned</small>}
+                  </td>
+                  <td>
+                    <button className="secondary" disabled={busy || !!teaching}
+                      onClick={() => run(() => action(`/staff/products/${p.id}/teach`, { tray_id: teachTray, seconds, max_refs: 20, reason: "Teach product appearance" }))}>
+                      Teach
+                    </button>{" "}
+                    <button className="textbutton" onClick={() => setOpen(open === p.id ? "" : p.id)}>
+                      {open === p.id ? "Hide" : "References"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {open && (
+          <div className="refgrid">
+            {refs.filter((r) => r.product_id === open).length === 0 && <p className="muted">No references yet.</p>}
+            {refs
+              .filter((r) => r.product_id === open)
+              .map((r) => (
+                <figure key={r.id} className={r.status === "ACTIVE" ? "" : "rejected"}>
+                  <CatalogueImage name={r.file} token={token} alt={`Reference of ${open}`} />
+                  <figcaption>
+                    {r.source === "TEACH" ? "teach" : "restock"} · {r.status.toLowerCase()}
+                    <button className="textbutton"
+                      onClick={() => {
+                        const reason = prompt(r.status === "ACTIVE" ? "Reject this reference. Reason:" : "Restore this reference. Reason:");
+                        if (reason) run(() => action(`/staff/references/${r.id}/${r.status === "ACTIVE" ? "reject" : "restore"}`, { reason }));
+                      }}>
+                      {r.status === "ACTIVE" ? "Reject" : "Restore"}
+                    </button>
+                  </figcaption>
+                </figure>
+              ))}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function OverviewAlerts({ data, pending }: { data: any; pending: any[] }) {
+  const reasons = (code: string) => pending.filter((h: any) => (h.reason || []).includes(code)).length;
+  const tracked = data.trays.some((t: any) => t.unit_tracking);
+  const onShelf = (pid: string) => data.tray_units.filter((u: any) => u.product_id === pid && u.status === "ON_TRAY").length;
+  const stocked = new Set(data.tray_units.map((u: any) => u.product_id));
+  const alerts: string[] = [];
+  if (reasons("RETURNED_TO_OTHER_TRAY")) alerts.push(`${reasons("RETURNED_TO_OTHER_TRAY")} item(s) put back on the wrong tray: confirm in Evidence review to move them.`);
+  if (reasons("WEIGHT_NO_UNIT_MATCH")) alerts.push(`${reasons("WEIGHT_NO_UNIT_MATCH")} weight change(s) match no known item: a foreign object, or an item placed without loading.`);
+  if (tracked)
+    for (const p of data.products.filter((p: any) => stocked.has(p.id) && onShelf(p.id) <= 1))
+      alerts.push(`${p.name}: ${onShelf(p.id)} left on the shelf — restock with the tray-loading wizard.`);
+  const unlearned = data.tray_units.filter((u: any) => u.status === "ON_TRAY" && (u.reference_status || "").startsWith("FAILED")).length;
+  if (unlearned) alerts.push(`${unlearned} loaded item(s) could not be cut out of the camera stills: teach those products in Products & recognition.`);
+  if (!alerts.length) return null;
+  return (
+    <section className="panel">
+      <h2>Needs attention</h2>
+      {alerts.map((a) => (
+        <Notice key={a}>{a}</Notice>
+      ))}
+    </section>
   );
 }

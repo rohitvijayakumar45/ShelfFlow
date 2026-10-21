@@ -2,7 +2,7 @@
 
 A standalone, continuous-sensing smart-store prototype for **one OV3660 shelf camera, two independently weighed trays, and concurrent shoppers**. React customer PWA and staff app, FastAPI/SQLAlchemy, PostgreSQL/Alembic, Redis/RQ, MQTT, native laptop vision, and PlatformIO controllers.
 
-**Current boundary:** the simulator-backed shopping flow runs through the real ingestion/fusion interface. Physical ownership extraction is deliberately review-first. No custom SKU model is supplied or trained; no hardware has been physically verified. The camera carrier is unknown and its pins are not invented. See [implementation status](docs/status.md).
+**Current prototype (16 October):** one mixed-product tray with three calibrated load cells, two RC522 readers, a verified OV3660 camera and a trained three-product pilot. The USB controller integration and customer/staff apps run locally in hardware mode. Physical ownership remains review-first; payments are simulated. Follow [local hardware integration](docs/local-hardware-integration.md), or use the simulation instructions below. Historical validation is in [implementation status](docs/status.md).
 
 ## Fast local start (Windows, no Docker required)
 
@@ -57,10 +57,12 @@ Includes migrations, seeding, apps, PostgreSQL, Redis, Mosquitto, durable MQTT i
 - [Demo walkthrough](docs/demo.md)
 - [Hardware, BOM and wiring](docs/wiring.md) and [placement drawing](docs/placement.svg)
 - [Use the spare ESP32 as a programmer](docs/programming-camera.md)
+- [Two RC522 readers and the new 38-pin camera programmer](docs/dual-rc522-and-38pin-programmer.md)
 - [Shelf sensor controller step-by-step bring-up](docs/sensor-controller-bringup.md)
 - [Standalone HX711 + 3 kg load cell weight test](firmware/hx711-test/README.md)
 - [Requirements audit, 12 Oct 2026](docs/audit-2026-10-12.md)
 - [Mixed-product trays: per-unit weights, weight-first matching](docs/mixed-trays.md)
+- [New products without retraining: restock auto-crops, teach mode, look-alikes, returns](docs/fewshot-learning.md)
 - [Dataset capture, annotation and training](docs/dataset.md)
 - [Event contracts, fusion and recovery](docs/architecture.md)
 - [Security and retention](docs/security.md)

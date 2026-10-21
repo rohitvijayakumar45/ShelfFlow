@@ -731,3 +731,117 @@ pre {
     }
   }
 }
+.wizardstep h3 {
+  margin-top: 8px;
+}
+label.inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.steps {
+  display: flex;
+  gap: 8px;
+  padding: 0;
+  margin: 12px 0 20px;
+  list-style: none;
+  counter-reset: step;
+  flex-wrap: wrap;
+}
+.steps li {
+  counter-increment: step;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.steps li::before {
+  content: counter(step) ". ";
+}
+.steps li.current {
+  border-color: var(--green);
+  color: var(--green);
+  font-weight: 600;
+}
+.steps li.done {
+  background: #eef3ec;
+}
+.weightreadout {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--green);
+}
+.simrow {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.photos {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.loadphoto {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+}
+.empty-photo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: #eef1ec;
+}
+.result {
+  margin: 16px 0;
+  padding: 12px 16px;
+  border-radius: 7px;
+  background: #eaf4ee;
+  border: 1px solid #b9d7c5;
+}
+.result.warn {
+  background: #fff6e5;
+  border-color: #e8c98a;
+}
+.result p {
+  margin: 6px 0 0;
+}
+.review .metrics strong {
+  font-size: 22px;
+  line-height: 1.2;
+}
+.refgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.refgrid figure {
+  margin: 0;
+}
+.refgrid figure.rejected {
+  opacity: 0.45;
+}
+.refgrid figcaption {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.lowstock {
+  color: #9a5b00;
+  font-weight: 600;
+}

@@ -602,6 +602,48 @@
     ]
    }
   },
+  "/staff/simulation/weight": {
+   "post": {
+    "summary": "Simulate Weight",
+    "description": "Simulation only: a settled tray weight change, as the shelf controller would report one.",
+    "operationId": "simulate_weight_staff_simulation_weight_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SimWeight"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ]
+   }
+  },
   "/staff/simulation/gate": {
    "post": {
     "summary": "Simulate Gate",
@@ -930,6 +972,91 @@
       "HTTPBearer": []
      }
     ]
+   }
+  },
+  "/staff/loads/{load_id}/snapshot": {
+   "post": {
+    "summary": "Load Snapshot",
+    "description": "Save one original camera still for the unit being loaded (before or after placement).",
+    "operationId": "load_snapshot_staff_loads__load_id__snapshot_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "load_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Load Id"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/catalogue-file/{file_name}": {
+   "get": {
+    "summary": "Catalogue File",
+    "operationId": "catalogue_file_staff_catalogue_file__file_name__get",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "file_name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "File Name"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
    }
   },
   "/staff/manual-assignment": {
@@ -1630,6 +1757,59 @@
     }
    }
   },
+  "/staff/trays/{tray_id}/geometry": {
+   "post": {
+    "summary": "Tray Geometry",
+    "description": "Load-cell support positions (mm) used to locate where weight changed on a tripod tray.",
+    "operationId": "tray_geometry_staff_trays__tray_id__geometry_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "tray_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Tray Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Geometry"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/staff/evidence/{event_id}": {
    "get": {
     "summary": "Evidence Metadata",
@@ -1692,6 +1872,562 @@
       }
      }
     ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/catalogue": {
+   "post": {
+    "summary": "Create Product",
+    "operationId": "create_product_staff_catalogue_post",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewProduct"
+       }
+      }
+     },
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ]
+   }
+  },
+  "/staff/products/{product_id}/teach": {
+   "post": {
+    "summary": "Start Teach",
+    "operationId": "start_teach_staff_products__product_id__teach_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "product_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Product Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Teach"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/teach/{teach_id}/stop": {
+   "post": {
+    "summary": "Stop Teach",
+    "operationId": "stop_teach_staff_teach__teach_id__stop_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "teach_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Teach Id"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/references": {
+   "get": {
+    "summary": "Staff References",
+    "operationId": "staff_references_staff_references_get",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "product_id",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Product Id"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/references/{reference_id}/reject": {
+   "post": {
+    "summary": "Reject Reference",
+    "operationId": "reject_reference_staff_references__reference_id__reject_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "reference_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Reference Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Reason"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/references/{reference_id}/restore": {
+   "post": {
+    "summary": "Restore Reference",
+    "operationId": "restore_reference_staff_references__reference_id__restore_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "reference_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Reference Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Reason"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/devices/vision-1/enrollment-jobs": {
+   "get": {
+    "summary": "Enrollment Jobs",
+    "operationId": "enrollment_jobs_devices_vision_1_enrollment_jobs_get",
+    "parameters": [
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/devices/vision-1/enrollment-jobs/{unit_id}/failed": {
+   "post": {
+    "summary": "Enrollment Failed",
+    "operationId": "enrollment_failed_devices_vision_1_enrollment_jobs__unit_id__failed_post",
+    "parameters": [
+     {
+      "name": "unit_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Unit Id"
+      }
+     },
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/JobFailed"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/devices/vision-1/catalogue-file/{file_name}": {
+   "get": {
+    "summary": "Device Catalogue File",
+    "operationId": "device_catalogue_file_devices_vision_1_catalogue_file__file_name__get",
+    "parameters": [
+     {
+      "name": "file_name",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "File Name"
+      }
+     },
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/devices/vision-1/references": {
+   "post": {
+    "summary": "Add Reference",
+    "operationId": "add_reference_devices_vision_1_references_post",
+    "parameters": [
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NewReference"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "get": {
+    "summary": "Device References",
+    "operationId": "device_references_devices_vision_1_references_get",
+    "parameters": [
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/devices/vision-1/gallery-status": {
+   "post": {
+    "summary": "Gallery Status",
+    "operationId": "gallery_status_devices_vision_1_gallery_status_post",
+    "parameters": [
+     {
+      "name": "x-device-key",
+      "in": "header",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "X-Device-Key"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/GalleryStatus"
+       }
+      }
+     }
+    },
     "responses": {
      "200": {
       "description": "Successful Response",
@@ -1795,7 +2531,6 @@
       },
       "type": "array",
       "maxItems": 8,
-      "minItems": 1,
       "title": "Markers"
      },
      "cleaned": {
@@ -1808,7 +2543,6 @@
     "required": [
      "reason",
      "rfid",
-     "markers",
      "cleaned"
     ],
     "title": "BraceletSetup"
@@ -1822,11 +2556,25 @@
       "title": "Reason"
      },
      "zero_raw": {
-      "type": "number",
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
       "title": "Zero Raw"
      },
      "mass_raw": {
-      "type": "number",
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
       "title": "Mass Raw"
      },
      "known_mass_g": {
@@ -1841,20 +2589,82 @@
      },
      "version": {
       "type": "string",
+      "maxLength": 60,
+      "minLength": 1,
       "title": "Version"
+     },
+     "cells": {
+      "anyOf": [
+       {
+        "items": {
+         "$ref": "#/components/schemas/CellCalibration"
+        },
+        "type": "array",
+        "maxItems": 8,
+        "minItems": 1
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Cells"
      }
     },
     "additionalProperties": false,
     "type": "object",
     "required": [
      "reason",
-     "zero_raw",
-     "mass_raw",
      "known_mass_g",
      "noise_g",
      "version"
     ],
     "title": "Calibrate"
+   },
+   "CalibrationReport": {
+    "properties": {
+     "method": {
+      "type": "string",
+      "enum": [
+       "SERVICE_MODE_3_POSITION",
+       "COMMAND"
+      ],
+      "title": "Method"
+     },
+     "known_mass_g": {
+      "type": "number",
+      "exclusiveMinimum": 0.0,
+      "title": "Known Mass G"
+     },
+     "cells": {
+      "items": {
+       "$ref": "#/components/schemas/CellCalibration"
+      },
+      "type": "array",
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Cells"
+     },
+     "verify_total_g": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Verify Total G"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "method",
+     "known_mass_g",
+     "cells"
+    ],
+    "title": "CalibrationReport",
+    "description": "A calibration performed on the device (staff service mode), reported for the audit trail."
    },
    "CancelGate": {
     "properties": {
@@ -2024,6 +2834,87 @@
     ],
     "title": "Candidate"
    },
+   "CellCalibration": {
+    "properties": {
+     "name": {
+      "type": "string",
+      "maxLength": 4,
+      "minLength": 1,
+      "title": "Name"
+     },
+     "zero_raw": {
+      "type": "number",
+      "title": "Zero Raw"
+     },
+     "counts_per_g": {
+      "type": "number",
+      "title": "Counts Per G"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "name",
+     "zero_raw",
+     "counts_per_g"
+    ],
+    "title": "CellCalibration"
+   },
+   "CellWeight": {
+    "properties": {
+     "name": {
+      "type": "string",
+      "maxLength": 4,
+      "minLength": 1,
+      "title": "Name"
+     },
+     "raw": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Raw"
+     },
+     "pre_g": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Pre G"
+     },
+     "post_g": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Post G"
+     },
+     "ok": {
+      "type": "boolean",
+      "title": "Ok",
+      "default": true
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "name"
+    ],
+    "title": "CellWeight",
+    "description": "One load cell of a multi-cell (tripod) tray."
+   },
    "Checkout": {
     "properties": {
      "idempotency_key": {
@@ -2131,7 +3022,8 @@
        "WEIGHT",
        "RFID",
        "HEALTH",
-       "BARRIER"
+       "BARRIER",
+       "CALIBRATION"
       ],
       "title": "Event Type"
      },
@@ -2188,6 +3080,16 @@
       "anyOf": [
        {
         "$ref": "#/components/schemas/Weight"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "calibration": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/CalibrationReport"
        },
        {
         "type": "null"
@@ -2279,6 +3181,53 @@
     ],
     "title": "Dispense"
    },
+   "GalleryStatus": {
+    "properties": {
+     "version": {
+      "type": "string",
+      "maxLength": 60,
+      "title": "Version"
+     },
+     "products": {
+      "additionalProperties": {
+       "type": "integer"
+      },
+      "type": "object",
+      "title": "Products"
+     },
+     "live_references": {
+      "type": "integer",
+      "minimum": 0.0,
+      "title": "Live References"
+     },
+     "pairs": {
+      "items": {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      "type": "array",
+      "maxItems": 200,
+      "title": "Pairs"
+     },
+     "groups": {
+      "items": {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      "type": "array",
+      "maxItems": 100,
+      "title": "Groups"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "version",
+     "products",
+     "live_references"
+    ],
+    "title": "GalleryStatus"
+   },
    "GateAck": {
     "properties": {
      "command_id": {
@@ -2312,6 +3261,69 @@
      "position_ok"
     ],
     "title": "GateAck"
+   },
+   "Geometry": {
+    "properties": {
+     "reason": {
+      "type": "string",
+      "maxLength": 500,
+      "minLength": 3,
+      "title": "Reason"
+     },
+     "version": {
+      "type": "string",
+      "maxLength": 60,
+      "minLength": 1,
+      "title": "Version"
+     },
+     "cells": {
+      "items": {
+       "$ref": "#/components/schemas/GeometryCell"
+      },
+      "type": "array",
+      "maxItems": 8,
+      "minItems": 3,
+      "title": "Cells"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "reason",
+     "version",
+     "cells"
+    ],
+    "title": "Geometry"
+   },
+   "GeometryCell": {
+    "properties": {
+     "name": {
+      "type": "string",
+      "maxLength": 4,
+      "minLength": 1,
+      "title": "Name"
+     },
+     "x_mm": {
+      "type": "number",
+      "maximum": 2000.0,
+      "minimum": -2000.0,
+      "title": "X Mm"
+     },
+     "y_mm": {
+      "type": "number",
+      "maximum": 2000.0,
+      "minimum": -2000.0,
+      "title": "Y Mm"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "name",
+     "x_mm",
+     "y_mm"
+    ],
+    "title": "GeometryCell"
    },
    "HTTPValidationError": {
     "properties": {
@@ -2351,6 +3363,22 @@
     "additionalProperties": false,
     "type": "object",
     "title": "Health"
+   },
+   "JobFailed": {
+    "properties": {
+     "reason": {
+      "type": "string",
+      "maxLength": 200,
+      "minLength": 2,
+      "title": "Reason"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "reason"
+    ],
+    "title": "JobFailed"
    },
    "LoadUnit": {
     "properties": {
@@ -2447,6 +3475,127 @@
      "physical_confirmed"
     ],
     "title": "Manual"
+   },
+   "NewProduct": {
+    "properties": {
+     "product_id": {
+      "type": "string",
+      "maxLength": 40,
+      "minLength": 2,
+      "title": "Product Id"
+     },
+     "name": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Name"
+     },
+     "price_minor": {
+      "type": "integer",
+      "minimum": 0.0,
+      "title": "Price Minor"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "product_id",
+     "name",
+     "price_minor"
+    ],
+    "title": "NewProduct"
+   },
+   "NewReference": {
+    "properties": {
+     "product_id": {
+      "type": "string",
+      "title": "Product Id"
+     },
+     "source": {
+      "type": "string",
+      "enum": [
+       "RESTOCK_AUTO",
+       "TEACH"
+      ],
+      "title": "Source"
+     },
+     "image_b64": {
+      "type": "string",
+      "maxLength": 2100000,
+      "title": "Image B64"
+     },
+     "box": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "number"
+        },
+        "type": "array",
+        "maxItems": 4,
+        "minItems": 4
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Box"
+     },
+     "quality": {
+      "additionalProperties": true,
+      "type": "object",
+      "title": "Quality"
+     },
+     "unit_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Unit Id"
+     },
+     "teach_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Teach Id"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "product_id",
+     "source",
+     "image_b64"
+    ],
+    "title": "NewReference"
+   },
+   "Position": {
+    "properties": {
+     "x_mm": {
+      "type": "number",
+      "title": "X Mm"
+     },
+     "y_mm": {
+      "type": "number",
+      "title": "Y Mm"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "x_mm",
+     "y_mm"
+    ],
+    "title": "Position",
+    "description": "Tray-plane location (mm, tray geometry frame) of the load that changed."
    },
    "ProductSetup": {
     "properties": {
@@ -2702,6 +3851,17 @@
        "WEIGHT_FAULT"
       ],
       "title": "Scenario"
+     },
+     "unit_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Unit Id"
      }
     },
     "additionalProperties": false,
@@ -2712,6 +3872,69 @@
      "scenario"
     ],
     "title": "SimInteraction"
+   },
+   "SimWeight": {
+    "properties": {
+     "tray_id": {
+      "type": "string",
+      "title": "Tray Id"
+     },
+     "delta_g": {
+      "type": "number",
+      "maximum": 5000.0,
+      "minimum": -5000.0,
+      "title": "Delta G"
+     },
+     "noise_g": {
+      "type": "number",
+      "maximum": 50.0,
+      "minimum": 0.0,
+      "title": "Noise G",
+      "default": 0.5
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "tray_id",
+     "delta_g"
+    ],
+    "title": "SimWeight"
+   },
+   "Teach": {
+    "properties": {
+     "reason": {
+      "type": "string",
+      "maxLength": 500,
+      "minLength": 3,
+      "title": "Reason"
+     },
+     "tray_id": {
+      "type": "string",
+      "title": "Tray Id"
+     },
+     "seconds": {
+      "type": "integer",
+      "maximum": 90.0,
+      "minimum": 5.0,
+      "title": "Seconds",
+      "default": 20
+     },
+     "max_refs": {
+      "type": "integer",
+      "maximum": 40.0,
+      "minimum": 3.0,
+      "title": "Max Refs",
+      "default": 20
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "reason",
+     "tray_id"
+    ],
+    "title": "Teach"
    },
    "TraySetup": {
     "properties": {
@@ -2831,6 +4054,42 @@
      "settled": {
       "type": "boolean",
       "title": "Settled"
+     },
+     "cells": {
+      "anyOf": [
+       {
+        "items": {
+         "$ref": "#/components/schemas/CellWeight"
+        },
+        "type": "array",
+        "maxItems": 8
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Cells"
+     },
+     "position_mm": {
+      "anyOf": [
+       {
+        "$ref": "#/components/schemas/Position"
+       },
+       {
+        "type": "null"
+       }
+      ]
+     },
+     "geometry_version": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Geometry Version"
      }
     },
     "additionalProperties": false,
