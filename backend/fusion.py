@@ -88,27 +88,52 @@ def unit_tolerance(units, event_noise_g):
     """3-sigma allowance from the event noise plus each unit's own loading noise."""
     return 3 * sqrt(event_noise_g ** 2 + sum(u["noise_g"] ** 2 for u in units)) + WEIGHT_FLOOR_G
 
-def unit_matches(target_g, units, event_noise_g, max_units=MAX_UNITS_PER_EVENT):
-    """Return {sorted product tuple: (unit_ids, error_g)} for every combination that fits target_g."""
+POSITION_TOLERANCE_MM = 30.0  # starting value; replace with the measured position spread of the real tray
+
+def combo_centroid(combo):
+    """Weight-weighted centre of a set of units, or None if any unit has no recorded position."""
+    if any(u.get("x_mm") is None or u.get("y_mm") is None for u in combo):
+        return None
+    total = sum(u["weight_g"] for u in combo)
+    return (sum(u["weight_g"] * u["x_mm"] for u in combo) / total, sum(u["weight_g"] * u["y_mm"] for u in combo) / total)
+
+def unit_matches(target_g, units, event_noise_g, max_units=MAX_UNITS_PER_EVENT, position=None, position_tol_mm=POSITION_TOLERANCE_MM):
+    """Return {sorted product tuple: (unit_ids, error_g)} for every combination that fits target_g.
+
+    With a position (x_mm, y_mm), only combinations whose recorded centre lies within the
+    tolerance are kept, and the nearest one represents its product tuple.
+    """
     best = {}
     for size in range(1, min(max_units, len(units)) + 1):
         for combo in combinations(units, size):
             error = abs(sum(u["weight_g"] for u in combo) - target_g)
-            if error <= unit_tolerance(combo, event_noise_g):
-                key = tuple(sorted(u["product_id"] for u in combo))
-                if key not in best or error < best[key][1]:
-                    best[key] = ([u["id"] for u in combo], error)
-    return best
+            if error > unit_tolerance(combo, event_noise_g):
+                continue
+            rank = error
+            if position is not None:
+                centre = combo_centroid(combo)
+                if centre is None:
+                    continue
+                distance = sqrt((centre[0] - position[0]) ** 2 + (centre[1] - position[1]) ** 2)
+                if distance > position_tol_mm:
+                    continue
+                rank = distance
+            key = tuple(sorted(u["product_id"] for u in combo))
+            if key not in best or rank < best[key][2]:
+                best[key] = ([u["id"] for u in combo], error, rank)
+    return {k: (v[0], v[1]) for k, v in best.items()}
 
 def _owner(c, bindings):
     owners = {bindings[m][0] for m in c.marker_ids if m in bindings}
     return next(iter(owners)) if len(owners) == 1 and all(m in bindings for m in c.marker_ids) else None
 
-def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: dict, simulation: bool):
+def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: dict, simulation: bool, elsewhere: dict | None = None):
     """Fusion for a unit-tracked tray.
 
     on_tray: unit dicts (id, product_id, weight_g, noise_g, spot) currently on the tray.
     in_cart: {session_id: [unit dicts]} units from this tray currently in each cart.
+    elsewhere: {session_id: [unit dicts]} cart units taken from OTHER trays (to recognise a
+               return put back on the wrong tray; such events always need staff confirmation).
     Returns (vetoes, proposals, scores); proposals carry the exact unit_ids to move.
     """
     veto = []
@@ -163,6 +188,23 @@ def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: d
             units_by_id = {u["id"]: u for u in pool}
             matches = unit_matches(abs(delta), pool, noise)
             alternatives = [{"products": list(k), "unit_ids": v[0], "error_g": round(v[1], 2)} for k, v in sorted(matches.items(), key=lambda kv: kv[1][1])]
+            # Tripod trays: where the weight left from (pickups only; a returned unit has no stored place yet).
+            where = event.weight.position_mm
+            if matches and where is not None and action == "PICKUP" and all(u.get("x_mm") is not None for u in pool):
+                placed = unit_matches(abs(delta), pool, noise, position=(where.x_mm, where.y_mm))
+                if not placed:
+                    veto.append("POSITION_CONFLICT")  # weight fits, but not at the place it changed
+                else:
+                    matches = placed
+            if not matches and action == "RETURN" and elsewhere:
+                known = [o for o in owners if o]
+                other_pool = [u for sid in (known or list(elsewhere)) for u in elsewhere.get(sid, [])]
+                matches = unit_matches(abs(delta), other_pool, noise)
+                if matches:
+                    veto.append("RETURNED_TO_OTHER_TRAY")  # staff confirm moves the unit to this tray
+                    units_by_id = {u["id"]: u for u in other_pool}
+                    alternatives = [{"products": list(k), "unit_ids": v[0], "error_g": round(v[1], 2), "other_tray": True}
+                                    for k, v in sorted(matches.items(), key=lambda kv: kv[1][1])]
             if not matches:
                 veto.append("WEIGHT_NO_UNIT_MATCH")
             elif len(matches) == 1:
@@ -201,9 +243,11 @@ def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: d
             for i in mine:
                 by_product.setdefault(units_by_id[i]["product_id"], []).append(i)
             for product_id, ids in sorted(by_product.items()):
+                where = event.weight.position_mm
                 proposals.append({"session_id": owner, "product_id": product_id, "quantity": len(ids), "action": c.action,
                                   "product_track": c.product_track if len(by_product) == 1 else f"{c.product_track}:{product_id}",
-                                  "unit_ids": ids, "unit_alternatives": alternatives})
+                                  "unit_ids": ids, "unit_alternatives": alternatives,
+                                  "return_position_mm": [where.x_mm, where.y_mm] if where is not None and c.action == "RETURN" and len(chosen) == 1 else None})
     if not proposals:
         for c, owner in zip(event.candidates, owners):
             proposals.append({"session_id": owner, "product_id": c.product_id, "quantity": c.quantity, "action": c.action,

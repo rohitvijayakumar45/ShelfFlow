@@ -9,6 +9,19 @@ class Health(StrictModel):
     flags: list[str] = Field(default_factory=list, max_length=30)
     queue_overflow: int = Field(default=0, ge=0)
 
+class CellWeight(StrictModel):
+    """One load cell of a multi-cell (tripod) tray."""
+    name: str = Field(min_length=1, max_length=4)
+    raw: float | None = None
+    pre_g: float | None = None
+    post_g: float | None = None
+    ok: bool = True
+
+class Position(StrictModel):
+    """Tray-plane location (mm, tray geometry frame) of the load that changed."""
+    x_mm: float
+    y_mm: float
+
 class Weight(StrictModel):
     pre_g: float
     post_g: float
@@ -16,6 +29,21 @@ class Weight(StrictModel):
     filtered: float | None = None
     noise_g: float = Field(ge=0)
     settled: bool
+    cells: list[CellWeight] | None = Field(default=None, max_length=8)
+    position_mm: Position | None = None
+    geometry_version: str | None = None
+
+class CellCalibration(StrictModel):
+    name: str = Field(min_length=1, max_length=4)
+    zero_raw: float
+    counts_per_g: float
+
+class CalibrationReport(StrictModel):
+    """A calibration performed on the device (staff service mode), reported for the audit trail."""
+    method: Literal["SERVICE_MODE_3_POSITION", "COMMAND"]
+    known_mass_g: float = Field(gt=0)
+    cells: list[CellCalibration] = Field(min_length=1, max_length=8)
+    verify_total_g: float | None = None
 
 class Candidate(StrictModel):
     marker_ids: list[int] = Field(default_factory=list, max_length=16)
@@ -44,7 +72,7 @@ class Candidate(StrictModel):
 class DeviceEvent(StrictModel):
     schema_version: Literal[1] = 1
     event_id: str = Field(min_length=1, max_length=100)
-    event_type: Literal["INTERACTION", "WEIGHT", "RFID", "HEALTH", "BARRIER"]
+    event_type: Literal["INTERACTION", "WEIGHT", "RFID", "HEALTH", "BARRIER", "CALIBRATION"]
     device_id: str
     boot_id: str
     sequence_number: int = Field(ge=0)
@@ -57,6 +85,7 @@ class DeviceEvent(StrictModel):
     clock_uncertainty_ms: float = Field(ge=0)
     calibration_version: str
     weight: Weight | None = None
+    calibration: CalibrationReport | None = None
     evidence_refs: list[str] = Field(default_factory=list, max_length=100)
     candidates: list[Candidate] = Field(default_factory=list, max_length=20)
     sensor_health: Health = Field(default_factory=Health)
@@ -69,4 +98,6 @@ class DeviceEvent(StrictModel):
     def ordered_time(self):
         if self.capture_end < self.capture_start:
             raise ValueError("capture_end precedes capture_start")
+        if (self.event_type == "CALIBRATION") != (self.calibration is not None):
+            raise ValueError("calibration report is required exactly for CALIBRATION events")
         return self

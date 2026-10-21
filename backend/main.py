@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from backend import service as svc
 from backend.models import *
-from backend.schemas import StrictModel, DeviceEvent
+from backend.schemas import StrictModel, DeviceEvent, Weight, CellCalibration
 from backend.auth import issue, decode, staff, customer,hash_password,verify_password
 from backend.config import MODE, STAFF_PASSWORD
 from backend.db import SessionLocal
@@ -122,7 +122,11 @@ def vision_config(x_device_key: str = Header()):
         for t in db.scalars(select(Tray)):
             on_tray=[] if not t.unit_tracking else svc.unit_pools(db,t.id)[0]
             trays[t.id]={"roi":t.roi,"product_id":None if t.unit_tracking else t.product_id,"calibration_version":t.calibration_version,
+                         "load_open":bool(db.scalar(select(TrayLoad).where(TrayLoad.tray_id==t.id,TrayLoad.status=='OPEN'))),
                          "unit_tracking":t.unit_tracking,"units_on_tray":[{"id":u["id"],"product_id":u["product_id"],"spot":u["spot"]} for u in on_tray]}
+            now=time.time()
+            teach=db.scalar(select(TeachSession).where(TeachSession.tray_id==t.id,TeachSession.status=='ACTIVE',TeachSession.until>now,TeachSession.accepted<TeachSession.max_refs))
+            trays[t.id]["teach"]={"teach_id":teach.id,"product_id":teach.product_id,"until":teach.until,"remaining":teach.max_refs-teach.accepted} if teach else None
         return {"trays":trays}
 
 class Checkout(StrictModel):
@@ -190,15 +194,22 @@ def state(user=Depends(staff)):
             result[name] = [serialize(o) for o in db.scalars(select(model))]
         for d in result["devices"]:
             del d["secret_digest"]
+        for session in result['sessions']:
+            session['customer_alias']=db.get(Customer,session['customer_id']).alias
         for tray in result['trays']:
             latest=db.scalar(select(SensorEvent).where(SensorEvent.payload['tray_id'].as_string()==tray['id'],SensorEvent.payload['weight']['raw'].as_float().is_not(None)).order_by(SensorEvent.received.desc()).limit(1))
             tray['latest_sample']={'weight':latest.payload['weight'],'health':latest.payload['sensor_health'],'capture_end':latest.payload['capture_end'],'calibration_version':latest.payload['calibration_version']} if latest else None
+        recent=list(db.scalars(select(SensorEvent).where(SensorEvent.payload['event_type'].as_string()=='RFID').order_by(SensorEvent.received.desc()).limit(20)))
+        result['recent_taps']=[{'event_id':e.id,'captured':e.payload['capture_end'],
+                               'uid':next((r[5:] for r in e.payload['evidence_refs'] if r.startswith('RFID:')),None),
+                               'reader':next((r[12:] for r in e.payload['evidence_refs'] if r.startswith('RFID_READER:')),None)} for e in recent]
         return {**result, "mode": MODE}
 
 class SimInteraction(StrictModel):
     session_id: str
     tray_id: str
     scenario: Literal["PICKUP", "RETURN", "HIDDEN_MARKER", "CROSSED_HANDS", "CAMERA_FAILURE", "WEIGHT_FAULT"]
+    unit_id: str | None = None  # mixed trays: which physical unit moves (default: first available)
 
 @app.post("/staff/simulation/interaction")
 def simulate(body: SimInteraction, user=Depends(staff)):
@@ -214,9 +225,50 @@ def simulate(body: SimInteraction, user=Depends(staff)):
         device = svc.get(db, Device, "simulator")
         seq = max(int(time.time() * 1000), device.max_sequence + 1)
         marker = b.markers[0]
+        unit_delta = None
+        if tray.unit_tracking:
+            # Weight-first demo: the chosen unit's measured weight moves; vision reports UNKNOWN.
+            returning = body.scenario == "RETURN"
+            q = select(TrayUnit).where(TrayUnit.tray_id == tray.id, TrayUnit.status == ("IN_CART" if returning else "ON_TRAY"))
+            if returning:
+                q = q.where(TrayUnit.session_id == body.session_id)
+            if body.unit_id:
+                q = q.where(TrayUnit.id == body.unit_id)
+            unit = db.scalar(q.order_by(TrayUnit.created))
+            if not unit:
+                svc.fail("No matching unit " + ("in this cart from this tray" if returning else "on this tray"))
+            unit_delta = unit.weight_g if returning else -unit.weight_g
     changes = {"HIDDEN_MARKER": {"marker_ids": []}, "CROSSED_HANDS": {"crossed": True}, "CAMERA_FAILURE": {"model_status": "MODEL_UNAVAILABLE"}, "WEIGHT_FAULT": {"sensor_health": Health(ok=False, flags=["DISCONNECTED"])}}
-    event = interaction(marker=marker, tray=body.tray_id, action="RETURN" if body.scenario == "RETURN" else "PICKUP", sequence=seq, **changes.get(body.scenario, {}))
+    extra = {"product_id": "UNKNOWN", "sku": False} if unit_delta is not None else {}
+    event = interaction(marker=marker, tray=body.tray_id, action="RETURN" if body.scenario == "RETURN" else "PICKUP", sequence=seq, **extra, **changes.get(body.scenario, {}))
+    if unit_delta is not None:
+        event.weight = Weight(pre_g=2000, post_g=2000 + unit_delta, noise_g=0.5, settled=True)
     return svc.ingest(event)
+
+class SimWeight(StrictModel):
+    tray_id: str
+    delta_g: float = Field(ge=-5000, le=5000)
+    noise_g: float = Field(default=0.5, ge=0, le=50)
+
+@app.post("/staff/simulation/weight")
+def simulate_weight(body: SimWeight, user=Depends(staff)):
+    """Simulation only: a settled tray weight change, as the shelf controller would report one."""
+    if MODE != "simulation":
+        svc.fail("Simulation disabled", 403)
+    import uuid
+    with SessionLocal() as db:
+        tray = svc.get(db, Tray, body.tray_id)
+        device = svc.get(db, Device, "simulator")
+        seq = max(int(time.time() * 1000), device.max_sequence + 1)
+        calibration = tray.calibration_version
+    now = time.time()
+    event = DeviceEvent(event_id=str(uuid.uuid4()), event_type="WEIGHT", device_id="simulator", boot_id="sim-boot", sequence_number=seq,
+                        tray_id=body.tray_id, capture_start=now, capture_end=now, monotonic_ms=int(time.monotonic() * 1000),
+                        clock_synced=True, clock_uncertainty_ms=10, calibration_version=calibration,
+                        weight=Weight(pre_g=1000, post_g=1000 + body.delta_g, noise_g=body.noise_g, settled=True),
+                        evidence_refs=["SIMULATED:no-physical-sensor"])
+    svc.ingest(event)
+    return {"event_id": event.event_id, "delta_g": body.delta_g, "simulated": True}
 
 class SimGate(StrictModel):
     command_id: str
@@ -298,21 +350,48 @@ def gate_reset(body: Reason, user=Depends(staff)):
         svc.audit(db,"staff","GATE_MANUAL_RESET",body.model_dump())
     return {"ok":True}
 
-@app.get("/staff/camera/preview")
-def camera_preview(user=Depends(staff)):
+def camera_jpeg():
     import httpx
-    from fastapi.responses import Response
     url=os.getenv("CAMERA_URL")
     if not url:
         raise HTTPException(503,"Camera URL not configured")
     try:
         r=httpx.get(url.rstrip('/')+'/jpeg',headers={"X-Camera-Key":os.environ["CAMERA_KEY"]},timeout=3)
         r.raise_for_status()
-        if not r.headers.get('content-type','').startswith('image/jpeg') or len(r.content)>8_000_000:
+        if not r.headers.get('content-type','').startswith('image/jpeg') or len(r.content)>8_000_000 or not r.content.startswith(b'\xff\xd8'):
             raise ValueError('Invalid JPEG response')
-        return Response(r.content,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+        return r.content
     except Exception:
         raise HTTPException(503,"Camera unavailable; check connection and credentials")
+
+@app.get("/staff/camera/preview")
+def camera_preview(user=Depends(staff)):
+    from fastapi.responses import Response
+    return Response(camera_jpeg(),media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+def catalogue_root():
+    from backend.references import catalogue_root as root
+    return root()
+
+@app.post("/staff/loads/{load_id}/snapshot")
+def load_snapshot(load_id: str, user=Depends(staff)):
+    """Save one original camera still for the unit being loaded (before or after placement)."""
+    import uuid
+    with SessionLocal() as db:
+        if svc.get(db, TrayLoad, load_id).status != "OPEN":
+            svc.fail("Loading session is closed")
+    jpeg = camera_jpeg()
+    name = f"load-{load_id}-{uuid.uuid4().hex}.jpg"
+    (catalogue_root() / name).write_bytes(jpeg)
+    return {"ref": name, "bytes": len(jpeg)}
+
+@app.get("/staff/catalogue-file/{file_name}")
+def catalogue_file(file_name: str, user=Depends(staff)):
+    root = catalogue_root()
+    path = (root / file_name).resolve()
+    if path.parent != root or path.suffix.lower() != ".jpg" or not path.is_file():
+        raise HTTPException(404, "Catalogue image unavailable")
+    return FileResponse(path)
 
 class Manual(Reason):
     session_id: str
@@ -330,7 +409,7 @@ class BraceletReturn(Reason):
 
 class BraceletSetup(Reason):
     rfid: str = Field(pattern=r'^(?:[0-9A-F]{8}|[0-9A-F]{14}|[0-9A-F]{20})$')
-    markers: list[int] = Field(min_length=1,max_length=8)
+    markers: list[int] = Field(default_factory=list,max_length=8)
     cleaned: bool
 
 @app.post("/staff/bracelets/{bracelet_id}/setup")
@@ -475,15 +554,20 @@ def recent_weight_events(tray_id: str, since: float = 0, user=Depends(staff)):
         return out
 
 class Calibrate(Reason):
-    zero_raw: float
-    mass_raw: float
+    zero_raw: float | None = None
+    mass_raw: float | None = None
     known_mass_g: float = Field(gt=0)
     noise_g: float = Field(ge=0)
-    version: str
+    version: str = Field(min_length=1, max_length=60)
+    # Multi-cell (tripod) trays: one entry per load cell; replaces zero_raw/mass_raw.
+    cells: list[CellCalibration] | None = Field(default=None, min_length=1, max_length=8)
 
 @app.post("/staff/trays/{tray_id}/calibration")
 def calibrate(tray_id: str, body: Calibrate, user=Depends(staff)):
-    if body.zero_raw == body.mass_raw:
+    if body.cells:
+        if any(c.counts_per_g == 0 for c in body.cells) or len({c.name for c in body.cells}) != len(body.cells):
+            svc.fail("Each cell needs a distinct name and a non-zero counts-per-gram scale")
+    elif body.zero_raw is None or body.mass_raw is None or body.zero_raw == body.mass_raw:
         svc.fail("Calibration span is zero")
     with svc.transaction() as db:
         tray = svc.get(db, Tray, tray_id)
@@ -491,6 +575,31 @@ def calibrate(tray_id: str, body: Calibrate, user=Depends(staff)):
         db.add(Calibration(tray_id=tray.id, metadata_=body.model_dump()))
         svc.emit(db, "shelfflow/devices/sensor-1/commands", {"action": "CALIBRATE", "tray_id": tray.id, **body.model_dump()})
         svc.audit(db, "staff", "CALIBRATION", {"tray_id": tray.id, **body.model_dump()})
+    return {"ok": True}
+
+class GeometryCell(StrictModel):
+    name: str = Field(min_length=1, max_length=4)
+    x_mm: float = Field(ge=-2000, le=2000)
+    y_mm: float = Field(ge=-2000, le=2000)
+
+class Geometry(Reason):
+    version: str = Field(min_length=1, max_length=60)
+    cells: list[GeometryCell] = Field(min_length=3, max_length=8)
+
+@app.post("/staff/trays/{tray_id}/geometry")
+def tray_geometry(tray_id: str, body: Geometry, user=Depends(staff)):
+    """Load-cell support positions (mm) used to locate where weight changed on a tripod tray."""
+    names = [c.name for c in body.cells]
+    if len(set(names)) != len(names):
+        svc.fail("Cell names must be distinct")
+    (ax, ay), (bx, by), (cx, cy) = [(c.x_mm, c.y_mm) for c in body.cells[:3]]
+    if abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) < 100:  # twice the triangle area, mm^2
+        svc.fail("Support points are (nearly) in a line; spread them into a triangle")
+    with svc.transaction() as db:
+        tray = svc.get(db, Tray, tray_id)
+        tray.geometry = {"version": body.version, "cells": [c.model_dump() for c in body.cells]}
+        svc.emit(db, "shelfflow/devices/sensor-1/commands", {"action": "GEOMETRY", "tray_id": tray.id, "version": body.version, "cells": [c.model_dump() for c in body.cells]})
+        svc.audit(db, "staff", "TRAY_GEOMETRY", {"tray_id": tray.id, **body.model_dump()})
     return {"ok": True}
 
 @app.get("/staff/evidence/{event_id}")
@@ -540,3 +649,99 @@ async def websocket(ws: WebSocket):
         return
     except (asyncio.TimeoutError, HTTPException):
         await ws.close(code=1008)
+
+
+# ---------------- Few-shot product references (restock auto-crops, teach mode) ----------------
+from backend import references as refs
+
+class NewProduct(StrictModel):
+    product_id: str = Field(min_length=2, max_length=40)
+    name: str = Field(min_length=1, max_length=100)
+    price_minor: int = Field(ge=0)
+
+@app.post("/staff/catalogue")
+def create_product(body: NewProduct, user=Depends(staff)):
+    return refs.create_product(body.product_id, body.name, body.price_minor, user["sub"])
+
+class Teach(Reason):
+    tray_id: str
+    seconds: int = Field(default=20, ge=5, le=90)
+    max_refs: int = Field(default=20, ge=3, le=40)
+
+@app.post("/staff/products/{product_id}/teach")
+def start_teach(product_id: str, body: Teach, user=Depends(staff)):
+    return refs.start_teach(product_id, body.tray_id, body.seconds, body.max_refs, body.reason, user["sub"])
+
+@app.post("/staff/teach/{teach_id}/stop")
+def stop_teach(teach_id: str, user=Depends(staff)):
+    return refs.stop_teach(teach_id, user["sub"])
+
+@app.get("/staff/references")
+def staff_references(product_id: str | None = None, user=Depends(staff)):
+    with SessionLocal() as db:
+        teach=[serialize(t) for t in db.scalars(select(TeachSession).order_by(TeachSession.started.desc()).limit(20))]
+        return {"references": refs.reference_rows(db, product_id), "teach_sessions": teach,
+                "gallery_status": (db.get(Shelf, "shelf-1").camera_config or {}).get("gallery_status") if db.get(Shelf, "shelf-1") else None}
+
+@app.post("/staff/references/{reference_id}/reject")
+def reject_reference(reference_id: str, body: Reason, user=Depends(staff)):
+    return refs.set_reference_status(reference_id, "REJECTED", body.reason, user["sub"])
+
+@app.post("/staff/references/{reference_id}/restore")
+def restore_reference(reference_id: str, body: Reason, user=Depends(staff)):
+    return refs.set_reference_status(reference_id, "ACTIVE", body.reason, user["sub"])
+
+@app.get("/devices/vision-1/enrollment-jobs")
+def enrollment_jobs(x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    with SessionLocal() as db:
+        return refs.enrollment_jobs(db)
+
+class JobFailed(StrictModel):
+    reason: str = Field(min_length=2, max_length=200)
+
+@app.post("/devices/vision-1/enrollment-jobs/{unit_id}/failed")
+def enrollment_failed(unit_id: str, body: JobFailed, x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    return refs.job_failed(unit_id, body.reason)
+
+@app.get("/devices/vision-1/catalogue-file/{file_name}")
+def device_catalogue_file(file_name: str, x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    root = catalogue_root()
+    path = (root / file_name).resolve()
+    if path.parent != root or path.suffix.lower() not in (".jpg", ".png") or not path.is_file():
+        raise HTTPException(404, "Catalogue image unavailable")
+    return FileResponse(path)
+
+class NewReference(StrictModel):
+    product_id: str
+    source: Literal["RESTOCK_AUTO", "TEACH"]
+    image_b64: str = Field(max_length=2_100_000)
+    box: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    quality: dict = Field(default_factory=dict)
+    unit_id: str | None = None
+    teach_id: str | None = None
+
+@app.post("/devices/vision-1/references")
+def add_reference(body: NewReference, x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    return refs.add_reference(body.product_id, body.source, body.image_b64, body.box, body.quality, body.unit_id, body.teach_id)
+
+@app.get("/devices/vision-1/references")
+def device_references(x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    with SessionLocal() as db:
+        return [{"id": r["id"], "product_id": r["product_id"], "file": r["file"], "status": r["status"], "updated": r["updated"]} for r in refs.reference_rows(db)]
+
+class GalleryStatus(StrictModel):
+    version: str = Field(max_length=60)
+    products: dict[str, int]
+    live_references: int = Field(ge=0)
+    pairs: list[dict] = Field(default_factory=list, max_length=200)
+    groups: list[dict] = Field(default_factory=list, max_length=100)
+
+@app.post("/devices/vision-1/gallery-status")
+def gallery_status(body: GalleryStatus, x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    return refs.save_gallery_status(body.model_dump())

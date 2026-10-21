@@ -96,6 +96,8 @@ class Tray(Base):
     # True: mixed-product tray tracked per physical unit (tray_units); product_id is then ignored
     # and stock always equals the number of ON_TRAY units.
     unit_tracking: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Multi-cell (tripod) trays: {"version": str, "cells": [{"name", "x_mm", "y_mm"}]}.
+    geometry: Mapped[dict] = mapped_column(JSON, default=dict)
 
 class TrayLoad(Base):
     __tablename__ = "tray_loads"
@@ -118,7 +120,12 @@ class TrayUnit(Base):
     weight_g: Mapped[float] = mapped_column(Float)
     noise_g: Mapped[float] = mapped_column(Float)
     spot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Where on the tray the unit's weight landed (from the load-cell split), if the tray has geometry.
+    x_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    y_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
     crop_refs: Mapped[list] = mapped_column(JSON, default=list)
+    # Few-shot enrolment of this unit's look: PENDING (stills waiting for vision), DONE, NO_STILLS, FAILED:<reason>
+    reference_status: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="ON_TRAY")  # ON_TRAY | IN_CART | REMOVED
     session_id: Mapped[str | None] = mapped_column(ForeignKey("shopping_sessions.id"), nullable=True)
     created: Mapped[float] = mapped_column(Float, default=time.time)
@@ -257,3 +264,32 @@ class Outbox(Base):
     topic: Mapped[str] = mapped_column(String)
     payload: Mapped[dict] = mapped_column(JSON)
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ProductReference(Base):
+    """One reference crop of a product for the recognition gallery (few-shot, no retraining)."""
+    __tablename__ = "product_references"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    unit_id: Mapped[str | None] = mapped_column(ForeignKey("tray_units.id"), nullable=True)
+    teach_id: Mapped[str | None] = mapped_column(ForeignKey("teach_sessions.id"), nullable=True)
+    source: Mapped[str] = mapped_column(String)  # RESTOCK_AUTO | TEACH
+    file: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="ACTIVE")  # ACTIVE | REJECTED
+    box: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    quality: Mapped[dict] = mapped_column(JSON, default=dict)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    updated: Mapped[float] = mapped_column(Float, default=time.time)
+
+class TeachSession(Base):
+    """Staff shows a product to the camera; vision keeps diverse views as references."""
+    __tablename__ = "teach_sessions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    tray_id: Mapped[str] = mapped_column(ForeignKey("trays.id"))
+    actor: Mapped[str] = mapped_column(String)
+    started: Mapped[float] = mapped_column(Float, default=time.time)
+    until: Mapped[float] = mapped_column(Float)
+    max_refs: Mapped[int] = mapped_column(Integer, default=20)
+    accepted: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String, default="ACTIVE")  # ACTIVE | DONE | STOPPED

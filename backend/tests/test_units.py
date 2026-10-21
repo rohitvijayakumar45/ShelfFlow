@@ -229,3 +229,43 @@ def test_staff_remove_unit_and_api_loading_flow():
         assert c.get("/staff/trays/tray-a/units", headers=headers).json()[0]["status"] == "REMOVED"
         state = c.get("/staff/state", headers=headers).json()
         assert state["tray_units"] and state["tray_loads"]
+
+def test_wizard_flow_with_simulated_placements_and_bench_pickup(monkeypatch, tmp_path):
+    import backend.main as main
+    monkeypatch.setenv("EVIDENCE_ROOT", str(tmp_path))
+    monkeypatch.setattr(main, "camera_jpeg", lambda: b"\xff\xd8 still \xff\xd9")
+    with TestClient(app) as c:
+        headers = {"Authorization": "Bearer " + c.post("/auth/staff", json={"password": "local-demo-staff"}).json()["token"]}
+        with s.transaction() as db:
+            db.get(Tray, "tray-a").stock = 0
+        c.post("/staff/trays/tray-a/unit-tracking", headers=headers, json={"enabled": True, "reason": "wizard demo"})
+        load_id = c.post("/staff/trays/tray-a/loads", headers=headers, json={"reason": "wizard"}).json()["load_id"]
+        before = c.post(f"/staff/loads/{load_id}/snapshot", headers=headers).json()["ref"]
+        placed = c.post("/staff/simulation/weight", headers=headers, json={"tray_id": "tray-a", "delta_g": 331.4}).json()
+        after = c.post(f"/staff/loads/{load_id}/snapshot", headers=headers).json()["ref"]
+        unit = c.post(f"/staff/loads/{load_id}/units", headers=headers,
+                      json={"product_id": "coffee", "weight_event_id": placed["event_id"], "spot": 0, "crop_refs": [before, after]}).json()
+        assert unit["weight_g"] == pytest.approx(331.4)
+        assert c.get(f"/staff/catalogue-file/{after}", headers=headers).content.startswith(b"\xff\xd8")
+        assert c.get("/staff/catalogue-file/..%2F..%2Fsecret.jpg", headers=headers).status_code == 404
+        c.post(f"/staff/loads/{load_id}/close", headers=headers)
+        sid, _, _ = enter()
+        c.post("/staff/simulation/interaction", headers=headers, json={"session_id": sid, "tray_id": "tray-a", "scenario": "PICKUP"})
+        assert [i["product_id"] for i in snapshot(sid)["items"]] == ["coffee"]
+        r = c.post("/staff/simulation/interaction", headers=headers, json={"session_id": sid, "tray_id": "tray-a", "scenario": "PICKUP"})
+        assert r.status_code == 409  # tray is now empty
+        c.post("/staff/simulation/interaction", headers=headers, json={"session_id": sid, "tray_id": "tray-a", "scenario": "RETURN"})
+        assert snapshot(sid)["items"] == [] and units()[unit["unit_id"]].status == "ON_TRAY"
+
+def test_catalogue_stills_survive_evidence_retention(monkeypatch, tmp_path):
+    import os
+    from backend.jobs import maintenance
+    monkeypatch.setenv("EVIDENCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("EVIDENCE_RETENTION_DAYS", "0")
+    (tmp_path / "catalogue").mkdir()
+    still, shopper = tmp_path / "catalogue" / "load-x.jpg", tmp_path / "frame.jpg"
+    for f in (still, shopper):
+        f.write_bytes(b"x")
+        os.utime(f, (0, 0))
+    maintenance()
+    assert still.exists() and not shopper.exists()
