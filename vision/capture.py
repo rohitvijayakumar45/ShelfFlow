@@ -20,6 +20,8 @@ class Frame:
     height: int
     clock_uncertainty_ms: float
     capture_wall: float | None
+    # Per-frame vision output (boxes, hands, markers) kept with the evidence for the review player.
+    annotations: dict | None = None
 
 class RollingBuffer:
     def __init__(self, max_frames=120, max_bytes=64 * 1024 * 1024):
@@ -37,7 +39,9 @@ class RollingBuffer:
                 self.size -= len(self.frames.popleft().jpeg)
                 self.dropped += 1
 
-    def preserve(self, root, event_id, start_monotonic, end_monotonic):
+    def preserve(self, root, event_id, start_monotonic, end_monotonic, redact=None):
+        """Write the frames of one collection window. redact(jpeg) -> (jpeg, faces) blurs faces;
+        frames without a face stay the original bytes (no recompression)."""
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         with self.lock:
@@ -45,8 +49,11 @@ class RollingBuffer:
         refs = []
         for f in selected:
             name = f"{event_id}-{f.boot_id}-{f.sequence}.jpg"
-            (root / name).write_bytes(f.jpeg)  # Original JPEG: no recompression.
+            jpeg, faces = redact(f.jpeg) if redact else (f.jpeg, 0)
+            (root / name).write_bytes(jpeg)
             metadata = {key: value for key, value in vars(f).items() if key != "jpeg"}
+            metadata["faces_redacted"] = faces
+            metadata["original_bytes"] = faces == 0
             (root / name.replace('.jpg', '.json')).write_text(json.dumps(metadata), encoding="utf-8")
             refs.append(name)
         return refs

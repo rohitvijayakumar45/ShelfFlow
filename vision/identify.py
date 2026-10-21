@@ -62,8 +62,9 @@ class Match:
 class Gallery:
     """Reference embeddings per product, versioned by content hash."""
 
-    def __init__(self, embedder_name, vectors=None, labels=None, sources=None, created=None):
+    def __init__(self, embedder_name, vectors=None, labels=None, sources=None, created=None, mask="none"):
         self.embedder_name = embedder_name
+        self.mask = mask  # background masking used for the references (vision.segment); queries must match
         self.vectors = np.zeros((0, 0), np.float32) if vectors is None else np.asarray(vectors, np.float32)
         self.labels = list(labels or [])
         self.sources = list(sources or [])
@@ -132,7 +133,8 @@ class Gallery:
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(path, vectors=self.vectors, labels=np.array(self.labels), sources=np.array(self.sources))
         path.with_suffix(".json").write_text(json.dumps({"version": self.version, "embedder": self.embedder_name, "created": self.created,
-                                                         "products": self.products, "dim": int(self.vectors.shape[1]) if self.labels else 0}, indent=2))
+                                                         "products": self.products, "dim": int(self.vectors.shape[1]) if self.labels else 0,
+                                                         "mask": self.mask}, indent=2))
         return self.version
 
     @classmethod
@@ -140,7 +142,7 @@ class Gallery:
         path = Path(path)
         meta = json.loads(path.with_suffix(".json").read_text())
         data = np.load(path, allow_pickle=False)
-        gallery = cls(meta["embedder"], data["vectors"], data["labels"].tolist(), data["sources"].tolist(), meta["created"])
+        gallery = cls(meta["embedder"], data["vectors"], data["labels"].tolist(), data["sources"].tolist(), meta["created"], meta.get("mask", "none"))
         if gallery.version != meta["version"]:
             raise ValueError("Gallery file does not match its recorded version")
         return gallery
@@ -169,13 +171,18 @@ class TrackVoter:
 class GalleryIdentifier:
     """Detections in, product ids out (or UNKNOWN), with per-track voting."""
 
-    def __init__(self, gallery, embedder, threshold, margin, voter=None, pad=0.1, guard=None):
+    def __init__(self, gallery, embedder, threshold, margin, voter=None, pad=0.1, guard=None, masker=None, colour=None):
         if gallery.embedder_name != getattr(embedder, "name", None):
             raise ValueError("Gallery was built with a different embedder")
+        if gallery.mask != getattr(masker, "name", "none"):
+            raise ValueError(f"Gallery references use mask '{gallery.mask}'; queries must use the same")
         self.gallery, self.embedder = gallery, embedder
         self.threshold, self.margin, self.pad = threshold, margin, pad
         self.voter = voter or TrackVoter()
         self.guard = guard  # optional fewshot.LookalikeGuard for products the gallery confuses
+        self.masker = masker  # optional vision.segment.Masker (background to neutral grey)
+        self.colour = colour  # optional vision.cues.ColourCue for flavour-variant near-ties
+        self.observer = None  # optional callback(track, crop, match) e.g. the uncertain-crop queue
 
     def crops(self, image, boxes):
         h, w = image.shape[:2]
@@ -191,13 +198,21 @@ class GalleryIdentifier:
         """Return detections with sku set to the track's voted product (UNKNOWN until settled)."""
         if not detections:
             return []
-        vectors = self.embedder.embed(self.crops(image, [d.box for d in detections]))
+        crops = self.crops(image, [d.box for d in detections])
+        if self.masker is not None:
+            crops = [self.masker(c)[0] for c in crops]
+        vectors = self.embedder.embed(crops)
         labelled = []
-        for detection, vector in zip(detections, vectors):
+        for detection, vector, crop in zip(detections, vectors, crops):
             match = self.gallery.identify(vector, self.threshold, self.margin)
             if self.guard is not None:
                 match = self.guard.refine(vector, match, self.threshold)
+            if self.colour is not None:
+                match = self.colour.refine(crop, match, self.threshold)
+            detection.match = match
             track = f"{clip_id}:{detection.track_id}"
+            if self.observer is not None:
+                self.observer(track, crop, match)
             self.voter.add(track, match)
             detection.sku = self.voter.decision(track) if detection.track_id is not None else match.product_id
             labelled.append(detection)

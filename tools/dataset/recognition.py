@@ -40,8 +40,12 @@ def transform_box(box_px, roi_px, min_visible):
     cw, ch = rx2 - rx1, ry2 - ry1
     return (c, ((ix1 + ix2) / 2 - rx1) / cw, ((iy1 + iy2) / 2 - ry1) / ch, (ix2 - ix1) / cw, (iy2 - iy1) / ch), visible
 
-def crop_dataset(root, rois, output, min_visible=0.4, single_class=False):
+def crop_dataset(root, rois, output, min_visible=0.4, single_class=False, hand_class=None):
     """Cut each labelled full frame into tray crops (the detector runs on crops at runtime).
+
+    single_class maps every product to class 0 "item". hand_class (the source label id used for
+    hands) becomes class 1 "hand" for the two-class item+hand detector; hands are never dropped as
+    partial boxes because a hand reaching in from outside the tray is exactly what it must learn.
 
     Crops where any box is only slightly inside (0 < visible < min_visible) are skipped:
     keeping their pixels without a label would teach the model that a partial item is background.
@@ -49,7 +53,8 @@ def crop_dataset(root, rois, output, min_visible=0.4, single_class=False):
     """
     import cv2
     root, output = Path(root), Path(output)
-    manifest = {"source": str(root.resolve()), "min_visible": min_visible, "single_class": single_class, "rois": rois, "crops": [], "skipped_partial": 0}
+    manifest = {"source": str(root.resolve()), "min_visible": min_visible, "single_class": single_class, "hand_class": hand_class,
+                "rois": rois, "crops": [], "skipped_partial": 0}
     for image_path in _images(root / "images"):
         split = image_path.relative_to(root / "images").parts[0]
         image = cv2.imread(str(image_path))
@@ -61,10 +66,12 @@ def crop_dataset(root, rois, output, min_visible=0.4, single_class=False):
             roi = (int(x1 * width), int(y1 * height), int(x2 * width), int(y2 * height))
             rows, partial = [], False
             for box in boxes:
-                row, visible = transform_box(box, roi, min_visible)
+                is_hand = hand_class is not None and box[0] == hand_class
+                row, visible = transform_box(box, roi, 0.05 if is_hand else min_visible)
                 if row:
-                    rows.append((0 if single_class else row[0],) + row[1:])
-                elif 0 < visible:
+                    cls = 1 if is_hand else (0 if single_class else row[0])
+                    rows.append((cls,) + row[1:])
+                elif 0 < visible and not is_hand:
                     partial = True
             if partial:
                 manifest["skipped_partial"] += 1
@@ -91,6 +98,8 @@ def object_crops(root, names, output, pad=0.1, min_side=16):
             continue
         height, width = image.shape[:2]
         for i, row in enumerate(read_labels(root / "labels" / split / (image_path.stem + ".txt"))):
+            if row[0] >= len(names) or names[row[0]] == "hand":
+                continue  # hands are not products
             c, x1, y1, x2, y2 = to_pixels(row, width, height)
             px, py = (x2 - x1) * pad, (y2 - y1) * pad
             a, b, cc, d = max(0, int(x1 - px)), max(0, int(y1 - py)), min(width, int(x2 + px)), min(height, int(y2 + py))
@@ -104,8 +113,9 @@ def object_crops(root, names, output, pad=0.1, min_side=16):
             counts[split][product] += 1
     return counts
 
-def load_folder(folder, embedder, products=None, batch=32):
-    """Embed folder/<product_id>/* images. Returns (vectors, labels, sources)."""
+def load_folder(folder, embedder, products=None, batch=32, prepare=None):
+    """Embed folder/<product_id>/* images (prepare: optional crop -> crop, e.g. background masking).
+    Returns (vectors, labels, sources)."""
     import cv2
     vectors, labels, sources = [], [], []
     for product_dir in sorted(p for p in Path(folder).iterdir() if p.is_dir()):
@@ -115,19 +125,19 @@ def load_folder(folder, embedder, products=None, batch=32):
         for start in range(0, len(files), batch):
             chunk = files[start:start + batch]
             images = [cv2.imread(str(f)) for f in chunk]
-            ok = [(f, im) for f, im in zip(chunk, images) if im is not None]
+            ok = [(f, prepare(im) if prepare else im) for f, im in zip(chunk, images) if im is not None]
             if ok:
                 vectors.append(embedder.embed([im for _, im in ok]))
                 labels += [product_dir.name] * len(ok)
                 sources += [str(f) for f, _ in ok]
     return (np.vstack(vectors) if vectors else np.zeros((0, 1), np.float32)), labels, sources
 
-def enroll(folder, output, embedder, min_refs=8):
+def enroll(folder, output, embedder, min_refs=8, masker=None):
     from vision.identify import Gallery
-    vectors, labels, sources = load_folder(folder, embedder)
+    vectors, labels, sources = load_folder(folder, embedder, prepare=(lambda im: masker(im)[0]) if masker else None)
     if not labels:
         raise ValueError("No reference images found (expected folder/<product_id>/*.png)")
-    gallery = Gallery(embedder.name)
+    gallery = Gallery(embedder.name, mask=getattr(masker, "name", "none"))
     for product in sorted(set(labels)):
         idx = [i for i, l in enumerate(labels) if l == product]
         gallery.add(product, vectors[idx], [sources[i] for i in idx])
@@ -187,9 +197,41 @@ def gallery_eval(gallery_dir, query_dir, holdout, embedder, max_error=0.01):
     report["held_out_from_gallery"] = sorted(holdout)
     return report
 
-def make_yaml(dataset, names, output, single_class):
+def make_yaml(dataset, names, output, single_class, with_hands=False):
     dataset = Path(dataset).resolve()
     lines = [f"path: {dataset.as_posix()}", "train: images/train", "val: images/val", "test: images/test", "names:"]
-    lines += ["  0: item"] if single_class else [f"  {i}: {n}" for i, n in enumerate(names)]
+    lines += (["  0: item"] + (["  1: hand"] if with_hands else [])) if single_class else [f"  {i}: {n}" for i, n in enumerate(names)]
     Path(output).write_text("\n".join(lines) + "\n")
     return output
+
+
+def autolabel_hands(root, output, hand_class, finder=None, min_side=12):
+    """Pre-label hands with MediaPipe into a COPY of the labels (output/labels/...), class hand_class.
+
+    Machine labels are a starting point only: open them in the labelling tool and fix misses and
+    false boxes before training. Existing product labels are copied unchanged.
+    """
+    import cv2
+    root, output = Path(root), Path(output)
+    if finder is None:
+        from vision.hands import MediaPipeHands
+        finder = MediaPipeHands(max_hands=4, confidence=0.4)
+    counts = {"images": 0, "hands": 0}
+    for image_path in _images(root / "images"):
+        split = image_path.relative_to(root / "images").parts[0]
+        image = cv2.imread(str(image_path))
+        if image is None:
+            continue
+        h, w = image.shape[:2]
+        rows = [r for r in read_labels(root / "labels" / split / (image_path.stem + ".txt")) if r[0] != hand_class]
+        for x1, y1, x2, y2 in finder.detect(image):
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
+            if x2 - x1 < min_side or y2 - y1 < min_side:
+                continue
+            rows.append((hand_class, (x1 + x2) / 2 / w, (y1 + y2) / 2 / h, (x2 - x1) / w, (y2 - y1) / h))
+            counts["hands"] += 1
+        target = output / "labels" / split
+        target.mkdir(parents=True, exist_ok=True)
+        (target / (image_path.stem + ".txt")).write_text("".join(f"{r[0]} {r[1]:.6f} {r[2]:.6f} {r[3]:.6f} {r[4]:.6f}\n" for r in rows))
+        counts["images"] += 1
+    return counts

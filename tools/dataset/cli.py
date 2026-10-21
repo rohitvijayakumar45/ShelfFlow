@@ -139,13 +139,17 @@ def _names(value):
     return [n.strip() for n in value.split(',') if n.strip()]
 
 def _embedder(a):
-    from vision.identify import Dinov2Embedder
-    return Dinov2Embedder(a.device)
+    from vision.embedders import make_embedder
+    return make_embedder(getattr(a,'embedder','dinov2-small'),a.device)
+
+def _masker(a):
+    from vision.segment import Masker
+    return Masker(a.mask,a.device) if getattr(a,'mask','none')!='none' else None
 
 def crop(a):
     from tools.dataset.recognition import crop_dataset
     rois={k:v['roi'] for k,v in json.loads(Path(a.config).read_text())['trays'].items()}
-    m=crop_dataset(a.root,rois,a.output,a.min_visible,a.single_class)
+    m=crop_dataset(a.root,rois,a.output,a.min_visible,a.single_class,a.hand_class)
     print(json.dumps({'crops':len(m['crops']),'skipped_partial':m['skipped_partial'],'manifest':str(Path(a.output)/'crop-manifest.json')},indent=2))
 
 def objects(a):
@@ -154,7 +158,7 @@ def objects(a):
 
 def enroll_cmd(a):
     from tools.dataset.recognition import enroll
-    print(json.dumps(enroll(a.folder,a.output,_embedder(a)),indent=2))
+    print(json.dumps(enroll(a.folder,a.output,_embedder(a),masker=_masker(a)),indent=2))
 
 def gallery_eval_cmd(a):
     from tools.dataset.recognition import gallery_eval
@@ -164,7 +168,11 @@ def gallery_eval_cmd(a):
 
 def make_yaml_cmd(a):
     from tools.dataset.recognition import make_yaml
-    print(make_yaml(a.dataset,_names(a.names) if a.names else [],a.output,a.single_class))
+    print(make_yaml(a.dataset,_names(a.names) if a.names else [],a.output,a.single_class,a.with_hands))
+
+def hands_cmd(a):
+    from tools.dataset.recognition import autolabel_hands
+    print(json.dumps(autolabel_hands(a.root,a.output,a.hand_class),indent=2))
 
 def main():
     p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True)
@@ -178,11 +186,12 @@ def main():
     q=sub.add_parser('replay');q.add_argument('file');q.add_argument('--key',required=True);q.add_argument('--backend',default='http://127.0.0.1:8000');q.set_defaults(fn=replay)
     q=sub.add_parser('metrics');q.add_argument('file');q.add_argument('--output',required=True);q.set_defaults(fn=metrics)
     q=sub.add_parser('model');q.add_argument('action',choices=['train','evaluate','export']);q.add_argument('--model',default='yolo26n.pt');q.add_argument('--data',default='tools/dataset/data.example.yaml');q.add_argument('--device',default='cpu');q.add_argument('--epochs',type=int,default=100);q.add_argument('--imgsz',type=int,default=960);q.add_argument('--format',default='onnx');q.add_argument('--single-class',action='store_true',help='train one "item" class (open-set path)');q.add_argument('--batch',type=int,default=16);q.add_argument('--patience',type=int,default=30);q.set_defaults(fn=train)
-    q=sub.add_parser('crop',help='full-frame dataset -> tray crops with transformed labels');q.add_argument('root');q.add_argument('--config',required=True,help='vision config with tray ROIs');q.add_argument('--output',required=True);q.add_argument('--min-visible',type=float,default=0.4);q.add_argument('--single-class',action='store_true');q.set_defaults(fn=crop)
+    q=sub.add_parser('crop',help='full-frame dataset -> tray crops with transformed labels');q.add_argument('root');q.add_argument('--config',required=True,help='vision config with tray ROIs');q.add_argument('--output',required=True);q.add_argument('--min-visible',type=float,default=0.4);q.add_argument('--single-class',action='store_true');q.add_argument('--hand-class',type=int,help='source label id of hands -> class 1 "hand"');q.set_defaults(fn=crop)
     q=sub.add_parser('objects',help='labelled dataset -> per-product item crops');q.add_argument('root');q.add_argument('--names',required=True,help='comma list or data.yaml');q.add_argument('--output',required=True);q.add_argument('--pad',type=float,default=0.1);q.set_defaults(fn=objects)
-    q=sub.add_parser('enroll',help='folder/<product_id>/*.png -> gallery .npz');q.add_argument('folder');q.add_argument('--output',required=True);q.add_argument('--device',default='cpu');q.set_defaults(fn=enroll_cmd)
-    q=sub.add_parser('gallery-eval',help='open-set evaluation with held-out products');q.add_argument('--gallery-dir',required=True);q.add_argument('--query-dir',required=True);q.add_argument('--holdout',default='',help='products left out of the gallery (simulate unseen items)');q.add_argument('--max-error',type=float,default=0.01);q.add_argument('--device',default='cpu');q.add_argument('--output',required=True);q.set_defaults(fn=gallery_eval_cmd)
-    q=sub.add_parser('make-yaml');q.add_argument('dataset');q.add_argument('--names');q.add_argument('--output',required=True);q.add_argument('--single-class',action='store_true');q.set_defaults(fn=make_yaml_cmd)
+    q=sub.add_parser('enroll',help='folder/<product_id>/*.png -> gallery .npz');q.add_argument('folder');q.add_argument('--output',required=True);q.add_argument('--device',default='cpu');q.add_argument('--embedder',default='dinov2-small');q.add_argument('--mask',choices=['none','grabcut','sam'],default='none');q.set_defaults(fn=enroll_cmd)
+    q=sub.add_parser('gallery-eval',help='open-set evaluation with held-out products');q.add_argument('--gallery-dir',required=True);q.add_argument('--query-dir',required=True);q.add_argument('--holdout',default='',help='products left out of the gallery (simulate unseen items)');q.add_argument('--max-error',type=float,default=0.01);q.add_argument('--device',default='cpu');q.add_argument('--embedder',default='dinov2-small');q.add_argument('--output',required=True);q.set_defaults(fn=gallery_eval_cmd)
+    q=sub.add_parser('make-yaml');q.add_argument('dataset');q.add_argument('--names');q.add_argument('--output',required=True);q.add_argument('--single-class',action='store_true');q.add_argument('--with-hands',action='store_true',help='add class 1 "hand" (item+hand detector)');q.set_defaults(fn=make_yaml_cmd)
+    q=sub.add_parser('hands',help='pre-label hands with MediaPipe into a copy of the labels (review before training)');q.add_argument('root');q.add_argument('--output',required=True);q.add_argument('--hand-class',type=int,required=True,help='label id to use for hands');q.set_defaults(fn=hands_cmd)
     a=p.parse_args();a.fn(a)
 
 if __name__=='__main__':main()

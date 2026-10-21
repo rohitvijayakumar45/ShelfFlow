@@ -31,4 +31,12 @@ def full_frame_box(box, crop_origin):
 
 class ReviewFirstAssociator:
     def observe(self, detections, markers, clip_id, action="PICKUP"):
-        return [Candidate(marker_ids=[m["id"] for m in markers], product_id=d.sku, product_track=f"{clip_id}:{d.track_id}", hand_track="UNPROVEN", action=action, quantity=1, sku=d.sku != "UNKNOWN", identity=False, hand_product=False, trajectory=False, bracelet_hand=False, detector_confidence=d.confidence) for d in detections]
+        return [Candidate(marker_ids=[m["id"] for m in markers][:16], product_id=d.sku, product_track=f"{clip_id}:{d.track_id}", hand_track="UNPROVEN", action=action, quantity=1, sku=d.sku != "UNKNOWN", identity=False, hand_product=False, trajectory=False, bracelet_hand=False, detector_confidence=d.confidence, **scores(d.match)) for d in detections]
+
+def scores(match):
+    """Recognition scores carried on a candidate so staff decisions can re-tune thresholds."""
+    if match is None:
+        return {}
+    clip = lambda v, lo, hi: None if v is None else max(lo, min(hi, round(float(v), 4)))
+    return {"similarity": clip(match.similarity, -1, 1), "margin": clip(match.margin, -2, 2),
+            "top_product": match.top, "second_product": match.second, "via": match.via}

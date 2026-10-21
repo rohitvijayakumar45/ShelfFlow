@@ -1,0 +1,74 @@
+{
+ "train": "data/shelf-pilot/objects/train",
+ "test": "data/shelf-pilot/objects/val",
+ "products": {
+  "sanitizer": 48,
+  "sunscreen": 43,
+  "vicks": 41
+ },
+ "test_crops": {
+  "sanitizer": 16,
+  "sunscreen": 16,
+  "vicks": 18
+ },
+ "rows": [
+  {
+   "embedder": "dinov2-small",
+   "model": "facebook/dinov2-small",
+   "mask": "none",
+   "available": true,
+   "ms_per_crop": 6.5,
+   "top1@1": 0.756,
+   "top1@3": 0.868,
+   "top1@10": 0.942,
+   "top1@all": 0.96,
+   "auroc@3": 0.891,
+   "known@5%@3": 0.704,
+   "wrong@5%@3": 0.005,
+   "threshold@3": 0.7,
+   "auroc@all": 0.93,
+   "known@5%@all": 0.82,
+   "wrong@5%@all": 0.0,
+   "threshold@all": 0.738
+  },
+  {
+   "embedder": "dinov2-small",
+   "model": "facebook/dinov2-small",
+   "mask": "grabcut",
+   "available": true,
+   "ms_per_crop": 6.3,
+   "top1@1": 0.724,
+   "top1@3": 0.878,
+   "top1@10": 0.916,
+   "top1@all": 0.96,
+   "auroc@3": 0.888,
+   "known@5%@3": 0.694,
+   "wrong@5%@3": 0.012,
+   "threshold@3": 0.571,
+   "auroc@all": 0.962,
+   "known@5%@all": 0.88,
+   "wrong@5%@all": 0.02,
+   "threshold@all": 0.68
+  }
+ ],
+ "best": {
+  "embedder": "dinov2-small",
+  "model": "facebook/dinov2-small",
+  "mask": "grabcut",
+  "available": true,
+  "ms_per_crop": 6.3,
+  "top1@1": 0.724,
+  "top1@3": 0.878,
+  "top1@10": 0.916,
+  "top1@all": 0.96,
+  "auroc@3": 0.888,
+  "known@5%@3": 0.694,
+  "wrong@5%@3": 0.012,
+  "threshold@3": 0.571,
+  "auroc@all": 0.962,
+  "known@5%@all": 0.88,
+  "wrong@5%@all": 0.02,
+  "threshold@all": 0.68
+ },
+ "note": "Frame-level single crops; known@5% uses a threshold chosen on the same queries (optimistic). Ranking aid only."
+}
