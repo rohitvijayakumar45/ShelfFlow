@@ -49,6 +49,30 @@ std::atomic<uint32_t> readerReadCount[NREADER]{};
 std::atomic<uint32_t> rfidDropped{0}, rfidMaxScanGap[NREADER]{};
 uint8_t readerVersion[NREADER]{};
 
+// RF tuning for range and responsiveness. Only the scan task touches reader registers after
+// setup; bench commands only change these atomics and raise the dirty flag.
+//   power 0: chip defaults.      1: carrier (CW) drive maximum, modulation untouched.
+//   power 2: carrier AND modulation drive maximum (strongest field; measured best on this shelf, see reports/rfid-range-*.json).
+// threshold: RxThresholdReg (default 0x84). Lower MinLevel = more sensitive receiver.
+// settle_ms: time the field runs before polling, so the tag can power up (ISO 14443 wants >= 5 ms).
+// wake_tries: extra WUPA attempts per turn: a marginal tag often answers the second one.
+constexpr uint8_t RF_POWER_DEFAULT = 2, RF_THRESHOLD_DEFAULT = 0x84, RF_SETTLE_DEFAULT_MS = 6, RF_WAKE_TRIES_DEFAULT = 2;
+std::atomic<uint8_t> rfPower{RF_POWER_DEFAULT}, rfThreshold{RF_THRESHOLD_DEFAULT}, rfSettleMs{RF_SETTLE_DEFAULT_MS}, rfWakeTries{RF_WAKE_TRIES_DEFAULT};
+std::atomic<bool> rfDirty{true};
+void applyRfTuning(MFRC522& reader) {
+  const uint8_t power = rfPower.load();
+  reader.PCD_SetAntennaGain(MFRC522::RxGain_max);  // 48 dB receiver
+  reader.PCD_WriteRegister(MFRC522::GsNReg,    power == 0 ? 0x88 : power == 1 ? 0xF8 : 0xFF);
+  reader.PCD_WriteRegister(MFRC522::CWGsPReg,  power == 0 ? 0x20 : 0x3F);
+  reader.PCD_WriteRegister(MFRC522::ModGsPReg, power == 2 ? 0x3F : 0x20);
+  reader.PCD_WriteRegister(MFRC522::RxThresholdReg, rfThreshold.load());
+  // The library waits 25 ms (TReload 1000 x 25 us) for an answer, which is what an empty poll costs.
+  // A tag answers REQA/WUPA/SELECT within ~1 ms, so a 4 ms timeout (160 x 25 us) is safe and makes
+  // each empty poll ~6x faster: the shelf notices a presented tag sooner and polls both readers more often.
+  reader.PCD_WriteRegister(MFRC522::TReloadRegH, 0x00);
+  reader.PCD_WriteRegister(MFRC522::TReloadRegL, 0xA0);
+}
+
 // Only this task touches SPI/readers after setup. Flash writes, LCD and network
 // reconnects no longer schedule RF polling. Retain brief taps in RAM until
 // the main loop can persist them. Fields alternate to avoid mutual interference.
@@ -60,6 +84,7 @@ void rfidScanTask(void*) {
     const int selected = rfidOnly.load();
     const int r = selected >= 0 ? selected : next;
     next = (next + 1) % NREADER;
+    if(rfDirty.exchange(false)) { for(int o=0;o<NREADER;o++) applyRfTuning(readers[o]); }
     uint32_t now = millis();
     if(lastScan[r]) {
       uint32_t gap = now - lastScan[r];
@@ -69,7 +94,7 @@ void rfidScanTask(void*) {
     for(int o=0;o<NREADER;o++) if(o!=r) readers[o].PCD_AntennaOff();
     MFRC522& reader = readers[r];
     reader.PCD_AntennaOn();
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(rfSettleMs.load()));
     reader.PCD_StopCrypto1();
     reader.PCD_WriteRegister(MFRC522::CommandReg, MFRC522::PCD_Idle);
     reader.PCD_WriteRegister(MFRC522::TxModeReg, 0x00);
@@ -77,6 +102,10 @@ void rfidScanTask(void*) {
     reader.PCD_WriteRegister(MFRC522::ModWidthReg, 0x26);
     byte atqa[2], size=sizeof(atqa);
     auto wake = reader.PICC_WakeupA(atqa,&size);
+    for(uint8_t t=1; t<rfWakeTries.load() && wake!=MFRC522::STATUS_OK && wake!=MFRC522::STATUS_COLLISION; t++) {
+      size=sizeof(atqa);  // a tag at the edge of range often answers only the second attempt
+      wake = reader.PICC_WakeupA(atqa,&size);
+    }
     if((wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION) && reader.PICC_ReadCardSerial()) {
       RfidObservation observation{};
       observation.reader=r;observation.capturedAt=millis();
@@ -91,7 +120,7 @@ void rfidScanTask(void*) {
     reader.PCD_StopCrypto1();
     reader.PCD_WriteRegister(MFRC522::CommandReg, MFRC522::PCD_Idle);
     if(selected<0) reader.PCD_AntennaOff();
-    vTaskDelay(pdMS_TO_TICKS(2));
+    vTaskDelay(1);
   }
 }
 
@@ -133,6 +162,19 @@ void rfidConsole() {
         continue;
       }
 #endif
+      if(command.startsWith("rf")) {
+        // rfpower 0|1|2, rfthr <hex>, rfsettle <ms>, rftries <n>, rfstatus
+        String arg = command.indexOf(' ') > 0 ? command.substring(command.indexOf(' ') + 1) : "";
+        arg.trim();
+        if(command.startsWith("rfpower ") && (arg == "0" || arg == "1" || arg == "2")) rfPower.store(arg.toInt());
+        else if(command.startsWith("rfthr ")) { long v = strtol(arg.c_str(), nullptr, 16); if(v >= 0x10 && v <= 0xFF) rfThreshold.store((uint8_t)v); else Serial.println("RF thr refused: hex 10..FF"); }
+        else if(command.startsWith("rfsettle ")) { long v = arg.toInt(); if(v >= 3 && v <= 20) rfSettleMs.store((uint8_t)v); else Serial.println("RF settle refused: 3..20 ms"); }
+        else if(command.startsWith("rftries ")) { long v = arg.toInt(); if(v >= 1 && v <= 4) rfWakeTries.store((uint8_t)v); else Serial.println("RF tries refused: 1..4"); }
+        else if(command != "rfstatus") { Serial.println("RF commands: rfpower 0|1|2, rfthr <hex>, rfsettle <3-20>, rftries <1-4>, rfstatus"); continue; }
+        rfDirty.store(true);
+        Serial.printf("RF TUNE power=%u thr=0x%02X settle_ms=%u wake_tries=%u\n", rfPower.load(), rfThreshold.load(), rfSettleMs.load(), rfWakeTries.load());
+        continue;
+      }
       int selected = command == "r1" ? 0 : command == "r2" ? 1 : -1;
       if (command != "r1" && command != "r2" && command != "both") {
         Serial.println("Bench commands: r1, r2, both, mass <grams>, calstatus (Newline)"); continue;
@@ -601,7 +643,7 @@ void setup() {
   delay(2); digitalWrite(RC522_RST, HIGH); delay(50);
   for (int r = 0; r < NREADER; r++) {
     readers[r].PCD_Init(READER_SS[r], MFRC522::UNUSED_PIN);
-    readers[r].PCD_SetAntennaGain(MFRC522::RxGain_max);  // 48 dB: best receive sensitivity
+    applyRfTuning(readers[r]);                           // 48 dB receiver, driver strength, threshold
     readers[r].PCD_AntennaOff();                          // fields are switched on one reader at a time
     readerVersion[r] = readers[r].PCD_ReadRegister(MFRC522::VersionReg);
     Serial.printf("DIAG RC522 %s ss=%u version=0x%02X\n", READER_NAME[r], READER_SS[r], readers[r].PCD_ReadRegister(MFRC522::VersionReg));

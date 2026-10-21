@@ -1,0 +1,52 @@
+{
+ "label": "R2 same distance, extended",
+ "seconds_per_preset": 6.0,
+ "results": [
+  {
+   "reader": "r2",
+   "preset": "chip defaults, 1 try, 10 ms",
+   "reads_per_s": 22.7
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier max, 2 tries, 6 ms",
+   "reads_per_s": 24.8
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, 2 tries, 6 ms",
+   "reads_per_s": 30.0
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, thr 0x64",
+   "reads_per_s": 0.8
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, thr 0x44",
+   "reads_per_s": 19.5
+  },
+  {
+   "reader": "r2",
+   "preset": "max drive, 4 tries, 6 ms",
+   "reads_per_s": 26.7
+  },
+  {
+   "reader": "r2",
+   "preset": "max drive, 4 tries, 12 ms",
+   "reads_per_s": 23.0
+  },
+  {
+   "reader": "r2",
+   "preset": "max drive, 4 tries, 20 ms",
+   "reads_per_s": 16.7
+  },
+  {
+   "reader": "r2",
+   "preset": "max drive, 4 tries, 12 ms, thr 0x74",
+   "reads_per_s": 19.5
+  }
+ ],
+ "note": "Successful reads per second with a fixed tag; frame-level, not accuracy."
+}

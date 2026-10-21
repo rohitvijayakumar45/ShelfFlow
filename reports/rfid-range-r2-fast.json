@@ -1,0 +1,32 @@
+{
+ "label": "R2 after 4ms timeout",
+ "seconds_per_preset": 5.0,
+ "results": [
+  {
+   "reader": "r2",
+   "preset": "chip defaults, 1 try, 10 ms",
+   "reads_per_s": 0.0
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier max, 2 tries, 6 ms",
+   "reads_per_s": 0.0
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, 2 tries, 6 ms",
+   "reads_per_s": 0.0
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, thr 0x64",
+   "reads_per_s": 0.0
+  },
+  {
+   "reader": "r2",
+   "preset": "carrier+mod max, thr 0x44",
+   "reads_per_s": 15.4
+  }
+ ],
+ "note": "Successful reads per second with a fixed tag; frame-level, not accuracy."
+}

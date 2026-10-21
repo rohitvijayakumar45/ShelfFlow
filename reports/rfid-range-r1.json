@@ -1,0 +1,32 @@
+{
+ "label": "R1 same distance",
+ "seconds_per_preset": 6.0,
+ "results": [
+  {
+   "reader": "r1",
+   "preset": "chip defaults, 1 try, 10 ms",
+   "reads_per_s": 24.3
+  },
+  {
+   "reader": "r1",
+   "preset": "carrier max, 2 tries, 6 ms",
+   "reads_per_s": 27.0
+  },
+  {
+   "reader": "r1",
+   "preset": "carrier+mod max, 2 tries, 6 ms",
+   "reads_per_s": 27.0
+  },
+  {
+   "reader": "r1",
+   "preset": "carrier+mod max, thr 0x64",
+   "reads_per_s": 27.0
+  },
+  {
+   "reader": "r1",
+   "preset": "carrier+mod max, thr 0x44",
+   "reads_per_s": 26.3
+  }
+ ],
+ "note": "Successful reads per second with a fixed tag; frame-level, not accuracy."
+}
