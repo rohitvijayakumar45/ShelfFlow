@@ -68,6 +68,13 @@ class Candidate(StrictModel):
     # Unit-tracked trays: tray spot that the camera saw emptied (pickup) or filled (return).
     spot: int | None = Field(default=None, ge=0, le=31)
     chain_refs: list[str] = Field(default_factory=list, max_length=30)
+    # Recognition scores behind product_id (similarities, not probabilities). Staff decisions on
+    # reviewed events turn these into labelled data for re-tuning the gallery thresholds.
+    similarity: float | None = Field(default=None, ge=-1, le=1)
+    margin: float | None = Field(default=None, ge=-2, le=2)
+    top_product: str | None = Field(default=None, max_length=64)
+    second_product: str | None = Field(default=None, max_length=64)
+    via: str | None = Field(default=None, max_length=24)
 
 class DeviceEvent(StrictModel):
     schema_version: Literal[1] = 1
@@ -93,6 +100,8 @@ class DeviceEvent(StrictModel):
     blur: bool = False
     frame_gap_ms: float = Field(default=0, ge=0)
     model_status: Literal["MOCK", "TRAINED", "MODEL_UNAVAILABLE"] = "MODEL_UNAVAILABLE"
+    # Model registry: which detector / gallery / embedder / thresholds produced this event.
+    model_versions: dict[str, str] = Field(default_factory=dict, max_length=12)
 
     @model_validator(mode="after")
     def ordered_time(self):

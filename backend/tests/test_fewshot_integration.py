@@ -30,8 +30,8 @@ def api(tmp_path, monkeypatch):
 def restock_with_stills(product, color, seed):
     before = textured(seed)
     after = before.copy()
-    after[60:160, 110:180] = color
-    cv2.rectangle(after, (120, 90), (170, 120), (255, 255, 255), -1)  # label: gives the crop texture
+    after[60:160, 50:120] = color  # fully inside tray-a (left half): a crop cut by the tray edge is rejected
+    cv2.rectangle(after, (60, 90), (110, 120), (225, 225, 225), -1)  # label: gives the crop texture (not blown out: glare is rejected)
     root = refs.catalogue_root()
     cv2.imwrite(str(root / f"load-{seed}-b.jpg"), before); cv2.imwrite(str(root / f"load-{seed}-a.jpg"), after)
     load_id = s.open_load("tray-a", "restock", "staff")["load_id"] if seed else unit_tray()

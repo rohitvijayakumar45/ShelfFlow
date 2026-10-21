@@ -273,7 +273,7 @@ class ProductReference(Base):
     product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
     unit_id: Mapped[str | None] = mapped_column(ForeignKey("tray_units.id"), nullable=True)
     teach_id: Mapped[str | None] = mapped_column(ForeignKey("teach_sessions.id"), nullable=True)
-    source: Mapped[str] = mapped_column(String)  # RESTOCK_AUTO | TEACH
+    source: Mapped[str] = mapped_column(String)  # RESTOCK_AUTO | TEACH | STAFF_LABEL
     file: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="ACTIVE")  # ACTIVE | REJECTED
     box: Mapped[list | None] = mapped_column(JSON, nullable=True)
@@ -293,3 +293,21 @@ class TeachSession(Base):
     max_refs: Mapped[int] = mapped_column(Integer, default=20)
     accepted: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String, default="ACTIVE")  # ACTIVE | DONE | STOPPED
+
+class UncertainCrop(Base):
+    """A crop vision could not identify with confidence; staff name it and it becomes a reference."""
+    __tablename__ = "uncertain_crops"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    file: Mapped[str] = mapped_column(String)
+    tray_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    track: Mapped[str] = mapped_column(String)
+    top_product: Mapped[str | None] = mapped_column(String, nullable=True)
+    second_product: Mapped[str | None] = mapped_column(String, nullable=True)
+    similarity: Mapped[float] = mapped_column(Float)
+    margin: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String, default="OPEN")  # OPEN | LABELLED | DISCARDED
+    answer_product: Mapped[str | None] = mapped_column(String, nullable=True)
+    reference_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    actor: Mapped[str | None] = mapped_column(String, nullable=True)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    resolved: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -127,7 +127,7 @@ def vision_config(x_device_key: str = Header()):
             now=time.time()
             teach=db.scalar(select(TeachSession).where(TeachSession.tray_id==t.id,TeachSession.status=='ACTIVE',TeachSession.until>now,TeachSession.accepted<TeachSession.max_refs))
             trays[t.id]["teach"]={"teach_id":teach.id,"product_id":teach.product_id,"until":teach.until,"remaining":teach.max_refs-teach.accepted} if teach else None
-        return {"trays":trays}
+        return {"trays":trays,"recognition":recognition_settings(db)}
 
 class Checkout(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=100)
@@ -745,3 +745,104 @@ class GalleryStatus(StrictModel):
 def gallery_status(body: GalleryStatus, x_device_key: str = Header()):
     device_auth("vision-1", x_device_key)
     return refs.save_gallery_status(body.model_dump())
+
+
+# ---------------- Learning loop, analytics and review tools ----------------
+from backend import analytics
+
+class Uncertain(StrictModel):
+    track: str = Field(min_length=1, max_length=100)
+    tray_id: str | None = Field(default=None, max_length=40)
+    image_b64: str = Field(max_length=2_100_000)
+    top_product: str | None = Field(default=None, max_length=64)
+    second_product: str | None = Field(default=None, max_length=64)
+    similarity: float = Field(ge=-1, le=1)
+    margin: float = Field(ge=-2, le=2)
+
+@app.post("/devices/vision-1/uncertain")
+def add_uncertain(body: Uncertain, x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    return refs.add_uncertain(body.image_b64, body.track, body.tray_id, body.top_product, body.second_product, body.similarity, body.margin)
+
+@app.get("/staff/uncertain")
+def staff_uncertain(status: str = "OPEN", user=Depends(staff)):
+    with SessionLocal() as db:
+        return refs.uncertain_rows(db, status or None)
+
+class UncertainAnswer(StrictModel):
+    product_id: str | None = Field(default=None, max_length=40)
+
+@app.post("/staff/uncertain/{crop_id}/label")
+def label_uncertain(crop_id: str, body: UncertainAnswer, user=Depends(staff)):
+    return refs.label_uncertain(crop_id, body.product_id, user["sub"])
+
+@app.get("/staff/kpis")
+def staff_kpis(since: float = 0, user=Depends(staff)):
+    with SessionLocal() as db:
+        return analytics.kpis(db, since)
+
+def recognition_settings(db):
+    shelf = db.get(Shelf, "shelf-1")
+    return ((shelf.camera_config or {}) if shelf else {}).get("recognition")
+
+@app.get("/staff/recognition/tuning")
+def recognition_tuning(user=Depends(staff)):
+    with SessionLocal() as db:
+        return analytics.recognition_tuning(db, recognition_settings(db))
+
+class RecognitionSettings(Reason):
+    threshold: float = Field(ge=0.2, le=0.99)
+    margin: float = Field(ge=0, le=0.3)
+
+@app.post("/staff/recognition/settings")
+def set_recognition(body: RecognitionSettings, user=Depends(staff)):
+    """Staff-approved gallery thresholds; vision picks them up on its next config poll."""
+    with svc.transaction() as db:
+        for shelf in db.scalars(select(Shelf)):
+            config = dict(shelf.camera_config or {})
+            config["recognition"] = {"threshold": body.threshold, "margin": body.margin, "applied_by": user["sub"], "applied_at": time.time(), "reason": body.reason}
+            shelf.camera_config = config
+        svc.audit(db, user["sub"], "RECOGNITION_SETTINGS", body.model_dump())
+    return {"ok": True}
+
+@app.get("/devices/vision-1/recognition")
+def device_recognition(x_device_key: str = Header()):
+    device_auth("vision-1", x_device_key)
+    with SessionLocal() as db:
+        return recognition_settings(db) or {}
+
+@app.get("/staff/reports/shrink")
+def shrink(since: float = 0, user=Depends(staff)):
+    with SessionLocal() as db:
+        return analytics.shrink_report(db, since)
+
+@app.get("/staff/reports/drift")
+def drift(user=Depends(staff)):
+    with SessionLocal() as db:
+        return analytics.drift_report(db)
+
+@app.get("/staff/review/{hypothesis_id}/suggestion")
+def review_suggestion(hypothesis_id: str, user=Depends(staff)):
+    with SessionLocal() as db:
+        return analytics.suggestion(db, svc.get(db, Hypothesis, hypothesis_id))
+
+@app.get("/staff/evidence/{event_id}/timeline")
+def evidence_timeline(event_id: str, user=Depends(staff)):
+    with SessionLocal() as db:
+        result = analytics.timeline(db, event_id)
+        if result is None:
+            raise HTTPException(404, "Event not found")
+        return result
+
+@app.get("/customer/product-image/{product_id}")
+def product_image(product_id: str, user=Depends(customer)):
+    """Thumbnail for cart lines and receipts: the clearest learned reference of the product."""
+    with SessionLocal() as db:
+        name = refs.best_image(db, product_id)
+    if not name:
+        raise HTTPException(404, "No product image yet")
+    root = catalogue_root()
+    path = (root / name).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(404, "No product image yet")
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=600"})

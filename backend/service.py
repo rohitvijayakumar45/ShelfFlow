@@ -137,7 +137,8 @@ def cart(db, session_id):
     items = []
     for i in db.scalars(select(CartItem).where(CartItem.session_id == s.id, CartItem.quantity > 0).order_by(CartItem.product_id)):
         p = get(db, Product, i.product_id)
-        items.append({"product_id": p.id, "name": p.name, "quantity": i.quantity, "price_minor": i.price_minor})
+        has_image = db.scalar(select(ProductReference.id).where(ProductReference.product_id == p.id, ProductReference.status == "ACTIVE").limit(1)) is not None
+        items.append({"product_id": p.id, "name": p.name, "quantity": i.quantity, "price_minor": i.price_minor, "has_image": has_image})
     pending = list(db.scalars(select(Hypothesis).where(Hypothesis.status.in_(["PENDING_REVIEW", "DISPUTED"]))))
     # Unknown ownership is relevant to every active session until staff reconciles it.
     pending = [h for h in pending if h.session_id in (None, s.id)]
@@ -151,7 +152,9 @@ def cart(db, session_id):
             "pending": [{"id": h.id, "tray_id": h.tray_id, "reasons": h.reason, "status": h.status} for h in pending],
             "bracelet": {"id": bracelet.id, "state": bracelet.state} if bracelet else None,
             "receipt": receipt.content if receipt else None, "mode": MODE,
-            "confirmed_events": [{"id":h.id,"action":h.proposal.get("action"),"product_id":h.proposal.get("product_id"),"quantity":h.proposal.get("quantity")} for h in confirmed],
+            "confirmed_events": [{"id":h.id,"action":h.proposal.get("action"),"product_id":h.proposal.get("product_id"),"quantity":h.proposal.get("quantity"),
+                                  "name":(db.get(Product,h.proposal.get("product_id")).name if h.proposal.get("product_id") and db.get(Product,h.proposal.get("product_id")) else h.proposal.get("product_id")),
+                                  "at":(db.get(SensorEvent,h.event_id).payload["capture_end"] if db.get(SensorEvent,h.event_id) else None)} for h in confirmed],
             "corrections": [{"id":c.id,**c.detail} for c in corrections]}
 
 def correct(hypothesis_id, session_id, product_id, quantity_delta, inventory_delta, reason, key, actor, unit_ids=None):
@@ -243,11 +246,20 @@ def apply_proposal(db, h, proposal, reviewed=False):
     db.add(InventoryMovement(tray_id=tray.id, delta=-delta, reason="REVIEW" if reviewed else "FUSION", reference=h.id))
     emit(db, f"cart/{s.id}", {"version": s.cart_version})
 
+def same_payload(stored, new):
+    """Equal, ignoring empty optional fields added to the schema after the stored copy was written."""
+    if isinstance(stored, dict) and isinstance(new, dict):
+        added = set(new) - set(stored)
+        return set(stored) <= set(new) and all(new[k] in (None, {}, [], False) for k in added) and all(same_payload(stored[k], new[k]) for k in stored)
+    if isinstance(stored, list) and isinstance(new, list):
+        return len(stored) == len(new) and all(same_payload(a, b) for a, b in zip(stored, new))
+    return stored == new
+
 def ingest(event: DeviceEvent):
     with transaction() as db:
         old = db.get(SensorEvent, event.event_id)
         if old:
-            if old.payload != event.model_dump():
+            if not same_payload(old.payload, event.model_dump()):
                 fail("Event ID replay with different payload")
             return {"ack": event.event_id, "durable": True, "duplicate": True}
         duplicate_sequence = db.scalar(select(SensorEvent).where(SensorEvent.device_id == event.device_id, SensorEvent.boot_id == event.boot_id, SensorEvent.sequence_number == event.sequence_number))

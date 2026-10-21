@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 from sqlalchemy import select
-from backend.models import Product, Tray, TrayUnit, ProductReference, TeachSession, Shelf
+from backend.models import Product, Tray, TrayUnit, ProductReference, TeachSession, Shelf, UncertainCrop
 from backend.service import transaction, get, fail, audit
 
 MAX_IMAGE_BYTES = 1_500_000
@@ -150,3 +150,63 @@ def save_gallery_status(payload):
             config["gallery_status"] = {**payload, "received": time.time()}
             shelf.camera_config = config
         return {"ok": True}
+
+# ---------------------------------------------------------------- active learning
+MAX_OPEN_UNCERTAIN = 200
+
+def add_uncertain(image_b64, track, tray_id, top_product, second_product, similarity, margin):
+    """Vision could not decide this crop; keep it for a staff answer (bounded queue)."""
+    try:
+        data = base64.b64decode(image_b64, validate=True)
+    except ValueError:
+        fail("Crop is not valid base64")
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        fail("Crop missing or too large")
+    suffix = _image_suffix(data)
+    with transaction() as db:
+        open_rows = list(db.scalars(select(UncertainCrop).where(UncertainCrop.status == "OPEN").order_by(UncertainCrop.created)))
+        if len(open_rows) >= MAX_OPEN_UNCERTAIN:
+            open_rows[0].status, open_rows[0].resolved = "DISCARDED", time.time()  # oldest unanswered crop makes room
+        name = f"uncertain-{uuid.uuid4().hex}{suffix}"
+        (catalogue_root() / name).write_bytes(data)
+        row = UncertainCrop(file=name, tray_id=tray_id, track=track, top_product=top_product, second_product=second_product,
+                            similarity=similarity, margin=margin)
+        db.add(row)
+        db.flush()
+        return {"id": row.id}
+
+def uncertain_rows(db, status="OPEN", limit=60):
+    q = select(UncertainCrop).order_by(UncertainCrop.created.desc()).limit(limit)
+    if status:
+        q = q.where(UncertainCrop.status == status)
+    return [{"id": r.id, "file": r.file, "tray_id": r.tray_id, "top_product": r.top_product, "second_product": r.second_product,
+             "similarity": r.similarity, "margin": r.margin, "status": r.status, "answer_product": r.answer_product, "created": r.created}
+            for r in db.scalars(q)]
+
+def label_uncertain(crop_id, product_id, actor):
+    """Staff answer: product_id makes the crop an ACTIVE reference; None discards it (not a product / unclear)."""
+    with transaction() as db:
+        row = get(db, UncertainCrop, crop_id)
+        if row.status != "OPEN":
+            fail("Crop already answered")
+        row.actor, row.resolved = actor, time.time()
+        if product_id is None:
+            row.status = "DISCARDED"
+            audit(db, actor, "UNCERTAIN_DISCARDED", {"crop_id": row.id})
+            return {"id": row.id, "status": row.status}
+        get(db, Product, product_id)
+        ref = ProductReference(product_id=product_id, source="STAFF_LABEL", file=row.file,
+                               quality={"from_uncertain": row.id, "vision_top": row.top_product, "similarity": row.similarity})
+        db.add(ref)
+        db.flush()
+        row.status, row.answer_product, row.reference_id = "LABELLED", product_id, ref.id
+        audit(db, actor, "UNCERTAIN_LABELLED", {"crop_id": row.id, "product_id": product_id, "reference_id": ref.id,
+                                                "vision_top": row.top_product, "vision_was_right": row.top_product == product_id})
+        return {"id": row.id, "status": row.status, "reference_id": ref.id}
+
+def best_image(db, product_id):
+    """The clearest ACTIVE reference of a product (for cart and receipt thumbnails)."""
+    refs = list(db.scalars(select(ProductReference).where(ProductReference.product_id == product_id, ProductReference.status == "ACTIVE")))
+    if not refs:
+        return None
+    return max(refs, key=lambda r: ((r.quality or {}).get("score") or 0, r.source == "TEACH", r.created)).file
