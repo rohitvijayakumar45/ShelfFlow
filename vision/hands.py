@@ -149,3 +149,23 @@ def annotate(candidates, summary, action, min_marker_frames=2):
             c.identity = len(seen) == 1
         c.chain_refs = track["refs"][:30]
     return candidates
+
+def movement_candidates(summary, matches, clip_id, min_contact=1):
+    """Candidates for a collection window WITHOUT a scale: one per item track that left the tray
+    (PICKUP) or arrived on it (RETURN) under a hand. Items that only wobbled, or that moved with no
+    hand contact, produce nothing, so motion alone never floods staff review.
+
+    matches: {track_id: vision.identify.Match} last gallery verdict per track (may be missing).
+    """
+    from backend.schemas import Candidate
+    from vision.association import scores
+    out = []
+    for track_id, t in sorted(summary["tracks"].items()):
+        if not (t["exited"] or t["entered"]) or t["contact_frames"] < min_contact:
+            continue
+        match = matches.get(track_id)
+        known = match is not None and match.known
+        out.append(Candidate(product_id=match.product_id if known else "UNKNOWN", product_track=f"{clip_id}:{track_id}",
+                             hand_track="UNPROVEN", action="PICKUP" if t["exited"] else "RETURN", quantity=1,
+                             sku=known, detector_confidence=0.0, **scores(match)))
+    return annotate(out, summary, out[0].action) if out else out

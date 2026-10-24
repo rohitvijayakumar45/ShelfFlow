@@ -12,12 +12,21 @@
 #include <atomic>
 #include <freertos/queue.h>
 #include "rfid_tap.h"
+#include "cell_layout.h"
+#include "scale_solver.h"
+#include "manual_tare.h"
+#include "weighing_pipeline.h"
+#include "drift_check.h"
+#include "hold_tracker.h"
+#ifdef WEIGHING_SELF_TEST
+#include "weighing_self_test.h"
+#endif
 
-// Shelf sensor controller: one tray ("box") on three load cells in a tripod, an RC522,
+// Shelf sensor controller: one tray on two 10 kg cells (A left, C right), two RC522 readers,
 // a 16x2 I2C LCD and two staff service buttons.
 // PROPOSED for a separate ESP32-WROOM-32 DevKit. Never the camera board.
 // The buttons are staff-only maintenance controls inside the enclosure; they never
-// authorise a shopper. Normal-mode buttons only change the display.
+// authorise a shopper. Long normal-mode presses tare/clear the temporary reference.
 
 // ---------------- Pin map ----------------
 constexpr uint8_t SPI_SCK = 18, SPI_MISO = 19, SPI_MOSI = 23, RC522_RST = 22;  // SPI bus and RST shared
@@ -26,19 +35,43 @@ const uint8_t READER_SS[NREADER] = {21, 4};          // R1 left of tray front, R
 const char* READER_NAME[NREADER] = {"R1", "R2"};
 constexpr uint8_t I2C_SDA = 16, I2C_SCL = 17;      // NOT 21/22: those belong to the RC522
 constexpr uint8_t BTN_PAGE = 13, BTN_ACTION = 14;  // to GND, internal pull-ups
-constexpr int NCELL = 3;
-struct CellPins { char name; uint8_t dt, sck; };
-const CellPins CELL_PINS[NCELL] = {{'A', 32, 33}, {'B', 25, 26}, {'C', 34, 27}};  // GPIO34 is input-only: DT only
+// Active load-cell pins and calibration profile are defined in cell_layout.h.
 const char* TRAY_ID = "tray-a";
 
 // ---------------- Tuning (starting values; measure on the real platform) ----------------
+// Raw-domain filter and AZT tuning. Each alpha update consumes a NEW A/C pair.
+// Defaults are documented in weighing_pipeline.h. The zero of these cells wanders with
+// temperature (measured: +-1 g around a trend that reverses minute to minute, up to
+// ~4 g/min), so it cannot be predicted. Instead the step-hold tracker (hold_tracker.h)
+// re-tares to the last known tray weight every 2 s while settled and moves that weight
+// only on a settled step of at least 3 g (an item placed or picked up). The pipeline's
+// own empty-tray zero tracking is therefore off: the tracker does it for any load.
+WeighingConfig makeScaleConfig() {
+  WeighingConfig config;
+  config.autoZeroEnabled = false;
+  return config;
+}
+const WeighingConfig SCALE_CONFIG = makeScaleConfig();
+constexpr uint32_t SCALE_DEBUG_INTERVAL_MS = 1000;
+bool scaleDebugEnabled = true;
+bool weighingSelfTestOK = true;
 constexpr int WINDOW = 10;              // samples per cell (~1 s at 10 SPS)
 constexpr float STABLE_NOISE_G = 2.0;   // total noise below this counts as settled
-constexpr float EVENT_HYSTERESIS_G = 8.0;
+constexpr float EVENT_HYSTERESIS_G = 3.0;   // items weigh up to ~15 g; noise ~0.5 g
 constexpr uint32_t DWELL_MS = 600;
+HoldTracker<NCELL>::Config makeHoldConfig() {
+  HoldTracker<NCELL>::Config config;
+  config.anchorMs = 2000; config.settleMs = DWELL_MS; config.stepG = EVENT_HYSTERESIS_G; config.zeroSnapG = 1.5;
+  return config;
+}
+HoldTracker<NCELL> hold(makeHoldConfig());
 constexpr uint32_t SERVICE_TIMEOUT_MS = 120000;
-constexpr float CELL_OVERLOAD_G = 5000;
+constexpr float CELL_OVERLOAD_G = 9000;  // 90% of the 10 kg cell rating
 constexpr long SATURATION_RAW = 8388000;
+constexpr long GLITCH_COUNTS = 60000;   // ~240 g on one cell between two 100 ms reads
+// Quick calibration before demos: empty, mass over A, over C, at the centre, empty.
+constexpr uint32_t QC_WINDOW_MS = 5000, QC_STILL_MS = 1000, QC_STEP_TIMEOUT_MS = 30000;
+constexpr double QC_MOVE_COUNTS = 1500;  // ~6 g summed over the cells: the mass was moved
 
 DeviceBus bus("sensor-1");
 MFRC522 readers[NREADER] = {MFRC522(READER_SS[0], RC522_RST), MFRC522(READER_SS[1], RC522_RST)};
@@ -55,8 +88,15 @@ uint8_t readerVersion[NREADER]{};
 //   power 2: carrier AND modulation drive maximum (strongest field; measured best on this shelf, see reports/rfid-range-*.json).
 // threshold: RxThresholdReg (default 0x84). Lower MinLevel = more sensitive receiver.
 // settle_ms: time the field runs before polling, so the tag can power up (ISO 14443 wants >= 5 ms).
-// wake_tries: extra WUPA attempts per turn: a marginal tag often answers the second one.
-constexpr uint8_t RF_POWER_DEFAULT = 2, RF_THRESHOLD_DEFAULT = 0x84, RF_SETTLE_DEFAULT_MS = 6, RF_WAKE_TRIES_DEFAULT = 2;
+//   10 ms: with alternating fields a tag on the weaker reader (longer cable, weaker 3.3 V) did not
+//   power up within 6 ms and that reader never read in BOTH mode, while it read fine alone.
+// wake_tries: WUPA attempts per turn: a marginal tag often answers the second or third one.
+constexpr uint8_t RF_POWER_DEFAULT = 2, RF_THRESHOLD_DEFAULT = 0x84, RF_SETTLE_DEFAULT_MS = 10, RF_WAKE_TRIES_DEFAULT = 3;
+// A reader that heard a tag (ATQA) but failed to read its UID keeps its field on and retries
+// this many times before the scan moves to the other reader.
+constexpr uint8_t RF_READ_RETRIES = 3;
+// Per-reader diagnostics: turns that got an answer, successful UID reads, answers whose read failed.
+std::atomic<uint32_t> readerAnswered[NREADER]{}, readerReadFailed[NREADER]{};
 std::atomic<uint8_t> rfPower{RF_POWER_DEFAULT}, rfThreshold{RF_THRESHOLD_DEFAULT}, rfSettleMs{RF_SETTLE_DEFAULT_MS}, rfWakeTries{RF_WAKE_TRIES_DEFAULT};
 std::atomic<bool> rfDirty{true};
 void applyRfTuning(MFRC522& reader) {
@@ -106,7 +146,19 @@ void rfidScanTask(void*) {
       size=sizeof(atqa);  // a tag at the edge of range often answers only the second attempt
       wake = reader.PICC_WakeupA(atqa,&size);
     }
-    if((wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION) && reader.PICC_ReadCardSerial()) {
+    bool answered = wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION;
+    bool read = answered && reader.PICC_ReadCardSerial();
+    if(answered) readerAnswered[r]++;
+    for(uint8_t t=0; answered && !read && t<RF_READ_RETRIES; t++) {
+      // The tag is in the field but SELECT failed (edge of range, noise): retry while it is powered.
+      readerReadFailed[r]++;
+      reader.PCD_StopCrypto1();
+      size=sizeof(atqa);
+      wake = reader.PICC_WakeupA(atqa,&size);
+      answered = wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION;
+      read = answered && reader.PICC_ReadCardSerial();
+    }
+    if(read) {
       RfidObservation observation{};
       observation.reader=r;observation.capturedAt=millis();
       for(byte i=0;i<reader.uid.size;i++) snprintf(observation.uid+2*i,3,"%02X",reader.uid.uidByte[i]);
@@ -114,7 +166,7 @@ void rfidScanTask(void*) {
       if(taps[r].observe(observation.uid,observation.capturedAt) &&
          xQueueSend(rfidObservations,&observation,0)!=pdTRUE) rfidDropped++;
       reader.PICC_HaltA();
-    } else if(wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION) {
+    } else if(answered) {
       taps[r].responded(millis());
     } else taps[r].absent(millis());
     reader.PCD_StopCrypto1();
@@ -128,6 +180,10 @@ void rfidScanTask(void*) {
 bool calibrationConsole(const String& command);
 void usbState();
 void reportExistingCalibration();
+void requestManualTare();
+void clearManualTare();
+void requestEmptyTare();
+bool weighingConsole(const String& command);
 char rfidCommand[160] = {};
 unsigned rfidCommandLength = 0;
 bool rfidCommandOverflow = false;
@@ -141,11 +197,14 @@ void rfidConsole() {
       rfidCommandLength = 0;
       if (rfidCommandOverflow) { rfidCommandOverflow = false; Serial.println("RFID command too long"); continue; }
       if (!command.length()) continue;
-      if (calibrationConsole(command)) continue;
+      if (calibrationConsole(command) || weighingConsole(command)) continue;
 #ifdef USB_RUNTIME
       if(command=="usbstatus"){usbState();continue;}
       if(command=="next"){bus.usbNext();continue;}
       if(command=="calreport"){reportExistingCalibration();continue;}
+      if(command=="tare"){requestManualTare();continue;}
+      if(command=="tareempty"){requestEmptyTare();continue;}
+      if(command=="untare"){clearManualTare();continue;}
       if(command.startsWith("ack ")){
         String event=String(rfidCommand).substring(4); // event IDs are lower-case firmware IDs
         Serial.printf("SF_ACK %s %s\n",event.c_str(),bus.acknowledgeEvent(event)?"removed":"not_found");continue;
@@ -196,19 +255,46 @@ struct Cell {
   HX711 hx; char name = '?';
   long win[WINDOW] = {0}; uint8_t n = 0, idx = 0;
   long last = LONG_MIN; uint32_t lastReady = 0, lastChange = 0;
+  double gramsPerCount = 0; bool newRaw = false;
+  long pending = LONG_MIN; uint32_t glitches = 0;  // outlier held until the next read confirms it
   float zero = 0, cpg = 0;   // raw counts at empty, counts per gram (sign follows wiring)
   float x = 0, y = 0;        // support position, mm
 } cells[NCELL];
 String calVersion = "UNSET", geomVersion = "";
 bool geomSet = false;
 float knownMass = 500;
+ManualTare<NCELL> manualTare;
+WeighingPipeline<NCELL> weighing(SCALE_CONFIG);
+bool tareEmptyRequested = false;
+String tareMessage;
+uint32_t tareMessageUntil = 0;
+void tareFeedback(const String& message) { tareMessage = message; tareMessageUntil = millis() + 2500; }
 
+
+void appendCalibrationState(JsonDocument& d);
+void appendQuickCheckState(JsonDocument& d);
+bool qcActive();
+void qcStart(); void qcNext(); void qcCancel(const char* why); void qcReset();
 void usbState(){
   JsonDocument d;d["device_id"]="sensor-1";d["boot_id"]=bus.boot;d["monotonic_ms"]=millis();
   d["calibration_version"]=calVersion;d["known_mass_g"]=knownMass;d["queued"]=bus.queuedFiles;d["capacity"]=bus.QUEUE_CAPACITY;
+  for (const auto& pins : CELL_PINS) d["active_cells"].add(String(pins.name));
+  for (int i = 0; i < NCELL; ++i) if (weighing.included(i)) d["calculation_cells"].add(String(cells[i].name));
+  for (const auto& c : cells) d["glitches"][String(c.name)] = c.glitches;
+  appendQuickCheckState(d);
+  d["tare_active"] = manualTare.active(); d["tare_pending"] = manualTare.pending();
+  d["tare_offset_g"] = manualTare.totalOffset(); d["tare_count"] = manualTare.count();
+  d["azt_empty_confirmed"] = weighing.confirmedEmpty();
+  d["azt_tracking"] = weighing.value().zeroTracking;
+  d["azt_correction_g"] = weighing.value().zeroCorrectionG;
+  d["azt_correction_abs_g"] = weighing.value().zeroCorrectionAbsG;
+  d["ema_alpha"] = SCALE_CONFIG.emaAlpha;
+  d["held_g"] = hold.heldTotal();
+  appendCalibrationState(d);
   Serial.print("SF_STATE ");serializeJson(d,Serial);Serial.println();
 }
 void reportExistingCalibration(){
+  if (calVersion == "UNSET") { Serial.println("SF_ERROR calibration_required"); return; }
   JsonDocument d;bus.envelope(d,"CALIBRATION",TRAY_ID,calVersion.c_str());
   d["calibration"]["method"]="COMMAND";d["calibration"]["known_mass_g"]=knownMass;
   auto arr=d["calibration"]["cells"].to<JsonArray>();
@@ -219,7 +305,10 @@ void reportExistingCalibration(){
 
 struct Snap {
   bool ready = false, calibrated = false, fault = false;
-  long raw[NCELL] = {0}; float g[NCELL] = {0}; float total = 0, noise = 0;
+  long raw[NCELL] = {0}, calibrationRaw[NCELL] = {0};
+  // measured: fixed-calibration grams (drift included); g/total: drift-corrected by the hold tracker.
+  double filteredRaw[NCELL] = {0}, measured[NCELL] = {0}, g[NCELL] = {0}, total = 0, displayTotal = 0;
+  float noise = 0;
   String flags;
 };
 long medianRaw(const Cell& c) {
@@ -231,7 +320,52 @@ float stdRaw(const Cell& c) {
   if (c.n < 2) return 1e9; double m = 0; for (int i = 0; i < c.n; i++) m += c.win[i]; m /= c.n;
   double v = 0; for (int i = 0; i < c.n; i++) v += (c.win[i] - m) * (c.win[i] - m); return sqrt(v / c.n);
 }
-float gramsOf(int i, long raw) { return cells[i].cpg ? (raw - cells[i].zero) / cells[i].cpg : 0; }
+String noiseDiagnostic() {
+  String text;
+  for (auto& c : cells) { if (text.length()) text += " "; text += String(c.name) + "=" + String(stdRaw(c), 1); }
+  return text;
+}
+String rawDiagnostic(const Snap& s) {
+  String text;
+  for (int i = 0; i < NCELL; ++i) { if (i) text += " "; text += String(cells[i].name) + "=" + String(s.raw[i]); }
+  return text;
+}
+String scaleDiagnostic() {
+  String text;
+  for (auto& c : cells) { if (text.length()) text += " "; text += String(c.name) + "=" + String(c.cpg, 6); }
+  return text;
+}
+// Stable multiplier. cpg is retained only for backwards-compatible NVS/wire reports.
+// Its reciprocal is calculated once when calibration is loaded/saved, never by tare/AZT.
+double absoluteGramsOf(int i, double raw) { return (raw - cells[i].zero) * cells[i].gramsPerCount; }
+double gramsOf(int i, double raw) { return weighing.netAt(i, raw); }
+void refreshWeighingCalibration() {
+  WeighingPipeline<NCELL>::Calibration values[NCELL];
+  manualTare.clear();
+  for (int i = 0; i < NCELL; ++i) {
+    cells[i].gramsPerCount = isfinite(cells[i].cpg) && cells[i].cpg != 0 ? 1.0 / double(cells[i].cpg) : 0;
+    values[i] = {cells[i].zero, cells[i].gramsPerCount};
+    cells[i].newRaw = false;
+  }
+  if (!weighingSelfTestOK) for (auto& value : values) value.gramsPerCount = 0;
+  weighing.configure(values);
+  hold.reset();  // a new calibration starts from the empty tray
+}
+bool weighingConsole(const String& command) {
+  if (command == "qc start") { qcStart(); return true; }
+  if (command == "qc next") { qcNext(); return true; }
+  if (command == "qc cancel") { qcCancel("Cancelled"); return true; }
+#ifdef WEIGHING_SELF_TEST
+  if (command == "scale selftest") {
+    const int failure = weighing_self_test::run();
+    Serial.printf("WEIGH_SELFTEST %s line=%d\n", failure == 0 ? "PASS" : "FAIL", failure);
+    return true;
+  }
+#endif
+  if (command == "scale debug on") { scaleDebugEnabled = true; Serial.println("SCALE_DEBUG enabled"); return true; }
+  if (command == "scale debug off") { scaleDebugEnabled = false; Serial.println("SCALE_DEBUG disabled"); return true; }
+  return false;
+}
 void addFlag(String& flags, const String& f) { flags += (flags.length() ? "," : "") + f; }
 
 void sampleCells() {
@@ -240,39 +374,73 @@ void sampleCells() {
     if (!c.hx.is_ready()) continue;
     long raw = c.hx.read();
     c.lastReady = now;
+    // A read far from the last good one is held back: if the next read is back near the
+    // old value it was a corrupted HX711 transfer (all-0/all-1 bits), not load, and is
+    // dropped. A real load step is confirmed by the next read and accepted 100 ms late.
+    if (c.last != LONG_MIN && labs(raw - c.last) > GLITCH_COUNTS &&
+        (c.pending == LONG_MIN || labs(raw - c.pending) > GLITCH_COUNTS)) {
+      if (c.pending != LONG_MIN) c.glitches++;
+      c.pending = raw; continue;
+    }
+    if (c.pending != LONG_MIN && c.last != LONG_MIN && labs(raw - c.last) <= GLITCH_COUNTS) c.glitches++;
+    c.pending = LONG_MIN; c.newRaw = true;
     if (raw != c.last) { c.lastChange = now; c.last = raw; }
     c.win[c.idx] = raw; c.idx = (c.idx + 1) % WINDOW; if (c.n < WINDOW) c.n++;
   }
+}
+// Acquisition above only reads ADC integers. This stage consumes a fresh complete
+// pair once, combines/filters raw counts, then converts to grams using fixed gains.
+void qcSample(const int32_t (&raw)[NCELL], uint32_t now);
+void processWeighingSample(bool allowTracking) {
+  for (int i = 0; i < NCELL; ++i) if (weighing.included(i) && !cells[i].newRaw) return;
+  int32_t raw[NCELL]; bool healthy = true; double noiseVariance = 0;
+  for (int i = 0; i < NCELL; ++i) {
+    auto& c = cells[i]; raw[i] = c.last == LONG_MIN ? 0 : c.last; c.newRaw = false;
+    if (!weighing.included(i)) continue;
+    healthy = healthy && c.n >= WINDOW && millis() - c.lastReady <= SCALE_CONFIG.staleMs &&
+              labs(c.last) < SATURATION_RAW;
+    double sd = stdRaw(c) * fabs(c.gramsPerCount); noiseVariance += sd * sd;
+  }
+  weighing.push(raw, millis(), healthy, sqrt(noiseVariance), allowTracking && !manualTare.pending() && !qcActive());
+  qcSample(raw, millis());
 }
 Snap snapshot() {
   Snap s; uint32_t now = millis(); s.ready = true; s.calibrated = true; double var = 0;
   for (int i = 0; i < NCELL; i++) {
     Cell& c = cells[i];
-    s.raw[i] = medianRaw(c);
-    if (c.n < WINDOW) s.ready = false;
-    if (!c.cpg) s.calibrated = false;
-    if (now - c.lastReady > 1000) { addFlag(s.flags, String("DISCONNECTED_") + c.name); s.fault = true; }
-    else if (now - c.lastChange > 10000) { addFlag(s.flags, String("STUCK_") + c.name); s.fault = true; }
-    if (labs(c.last) >= SATURATION_RAW) { addFlag(s.flags, String("SATURATED_") + c.name); s.fault = true; }
-    if (c.cpg) {
-      s.g[i] = gramsOf(i, s.raw[i]); s.total += s.g[i];
-      float sd = stdRaw(c) / fabs(c.cpg); var += sd * sd;
-      if (fabs(s.g[i]) > CELL_OVERLOAD_G) { addFlag(s.flags, String("OVERLOAD_") + c.name); s.fault = true; }
+    s.raw[i] = c.last == LONG_MIN ? 0 : c.last; // Actual ADC sample, never a scaled/reused value.
+    s.calibrationRaw[i] = medianRaw(c);          // Separate robust capture for calibration only.
+    s.filteredRaw[i] = weighing.value().filteredRaw[i];
+    bool included = weighing.included(i);
+    if (included && c.n < WINDOW) s.ready = false;
+    if (!weighing.hasCalibration()) s.calibrated = false;
+    if (included && now - c.lastReady > 1000) { addFlag(s.flags, String("DISCONNECTED_") + c.name); s.fault = true; }
+    // Identical ADC codes can be valid. Fresh DOUT conversions, not noise, prove liveness.
+    if (included && labs(c.last) >= SATURATION_RAW) { addFlag(s.flags, String("SATURATED_") + c.name); s.fault = true; }
+    if (c.cpg && included) {
+      s.measured[i] = gramsOf(i, s.filteredRaw[i]);
+      s.g[i] = hold.shown(i, s.measured[i]); s.total += s.g[i];
+      float sd = stdRaw(c) * fabs(c.gramsPerCount); var += sd * sd;
+      if (fabs(absoluteGramsOf(i, s.raw[i])) > CELL_OVERLOAD_G) { addFlag(s.flags, String("OVERLOAD_") + c.name); s.fault = true; }
     }
   }
+  if (s.calibrated && !weighing.fresh(now)) s.ready = false;
+  s.displayTotal = s.total;
   if (!s.calibrated) addFlag(s.flags, "UNCALIBRATED");
+  if (!s.ready && s.calibrated) addFlag(s.flags, "NOT_READY");
   s.noise = s.calibrated ? sqrt(var) : 0;
   return s;
 }
 
-// ---------------- Settled-change detection (baseline kept as RAW, never auto-tared) ----------------
-long baseRaw[NCELL] = {0}; bool baselineSet = false; uint32_t stableSince = 0;
+// ---------------- Settled-change detection: step-hold weighing ----------------
+// Events come from the hold tracker: one WEIGHT event per settled step (item placed or
+// picked up), with the held weight before and after. Drift between steps is re-tared away.
+uint32_t stableSince = 0;
 bool afterService = false;
-float baseGrams(int i) { return gramsOf(i, baseRaw[i]); }
 
 // Where the change happened: weighted average of support positions by each cell's change.
 bool changePosition(const float d[NCELL], float& x, float& y) {
-  if (!geomSet) return false;
+  if (NCELL < 3 || !geomSet) return false;
   float sum = 0; for (int i = 0; i < NCELL; i++) sum += d[i];
   if (fabs(sum) < EVENT_HYSTERESIS_G) return false;
   x = 0; y = 0;
@@ -283,49 +451,61 @@ bool changePosition(const float d[NCELL], float& x, float& y) {
   }
   return true;
 }
-void emitWeight(const Snap& s, const String& extraFlags) {
+void appendTareEvidence(JsonDocument& d) {
+  if (weighing.value().zeroCorrectionAbsG > 0) {
+    d["evidence_refs"].add("AZT_CORRECTION_G:" + String(weighing.value().zeroCorrectionG, 6));
+    d["evidence_refs"].add("AZT_CORRECTION_ABS_G:" + String(weighing.value().zeroCorrectionAbsG, 6));
+  }
+  if (!manualTare.active()) return;
+  d["evidence_refs"].add("TARE_REF:" + bus.boot + ":" + String(manualTare.count()));
+  d["evidence_refs"].add("TARE_OFFSET_G:" + String(manualTare.totalOffset(), 6));
+}
+void emitWeight(const Snap& s, const HoldTracker<NCELL>::Step& step, const String& extraFlags) {
   JsonDocument d; bus.envelope(d, "WEIGHT", TRAY_ID, calVersion.c_str());
-  float pre = 0, delta[NCELL]; long rawSum = 0;
+  appendTareEvidence(d);
+  d["evidence_refs"].add("STEP_HOLD:retare_2s");
+  float delta[NCELL]; long rawSum = 0;
   JsonArray arr = d["weight"]["cells"].to<JsonArray>();
   for (int i = 0; i < NCELL; i++) {
-    float b = baseGrams(i); pre += b; delta[i] = s.g[i] - b; rawSum += s.raw[i];
+    delta[i] = step.postCell[i] - step.preCell[i]; rawSum += s.raw[i];
     JsonObject c = arr.add<JsonObject>();
-    c["name"] = String(cells[i].name); c["raw"] = s.raw[i]; c["pre_g"] = b; c["post_g"] = s.g[i]; c["ok"] = true;
+    c["name"] = String(cells[i].name); c["raw"] = s.raw[i]; c["pre_g"] = step.preCell[i]; c["post_g"] = step.postCell[i]; c["ok"] = true;
   }
-  d["weight"]["raw"] = rawSum; d["weight"]["filtered"] = s.total; d["weight"]["pre_g"] = pre; d["weight"]["post_g"] = s.total;
+  const double pre = step.pre;
+  d["weight"]["raw"] = rawSum; d["weight"]["filtered"] = step.post; d["weight"]["pre_g"] = pre; d["weight"]["post_g"] = step.post;
   d["weight"]["noise_g"] = s.noise; d["weight"]["settled"] = true;
   float x, y;
   if (changePosition(delta, x, y)) { d["weight"]["position_mm"]["x_mm"] = x; d["weight"]["position_mm"]["y_mm"] = y; d["weight"]["geometry_version"] = geomVersion; }
   if (extraFlags.length()) { d["sensor_health"]["flags"].add(extraFlags); d["sensor_health"]["ok"] = false; }
   bus.persist(d);
-  Serial.printf("DIAG WEIGHT pre=%.1f post=%.1f delta=%.1f noise=%.2f\n", pre, s.total, s.total - pre, s.noise);
+  Serial.printf("DIAG WEIGHT pre=%.1f post=%.1f delta=%.1f noise=%.2f\n", pre, step.post, step.post - pre, s.noise);
 }
 void trackWeight(const Snap& s) {
-  uint32_t now = millis();
-  if (!s.ready || !s.calibrated || s.fault || s.noise >= STABLE_NOISE_G) { stableSince = 0; return; }
-  if (!stableSince) { stableSince = now; return; }
-  if (now - stableSince < DWELL_MS) return;
-  if (!baselineSet) { for (int i = 0; i < NCELL; i++) baseRaw[i] = s.raw[i]; baselineSet = true; return; }
-  float pre = 0; for (int i = 0; i < NCELL; i++) pre += baseGrams(i);
-  if (fabs(s.total - pre) < EVENT_HYSTERESIS_G) { afterService = false; return; }
-  emitWeight(s, afterService ? "AFTER_SERVICE" : "");
+  const uint32_t now = millis();
+  const bool settled = !manualTare.pending() && s.ready && s.calibrated && !s.fault &&
+                       weighing.settled() && s.noise < STABLE_NOISE_G;
+  stableSince = settled ? (stableSince ? stableSince : now) : 0;  // LCD "STABLE" indicator
+  if (!hold.update(s.measured, settled, now)) return;
+  emitWeight(s, hold.lastStep(), afterService ? "AFTER_SERVICE" : "");
   afterService = false;
-  for (int i = 0; i < NCELL; i++) baseRaw[i] = s.raw[i];
 }
 
 // ---------------- Persistent configuration ----------------
 void loadConfig() {
+  manualTare.clear();
   for (auto& c : cells) {
-    String k(c.name);
+    String k = String(CAL_KEY_PREFIX) + c.name;
     c.zero = prefs.getFloat((k + "z").c_str(), 0); c.cpg = prefs.getFloat((k + "k").c_str(), 0);
-    c.x = prefs.getFloat((k + "x").c_str(), 0); c.y = prefs.getFloat((k + "y").c_str(), 0);
+    String geometryKey(c.name);
+    c.x = prefs.getFloat((geometryKey + "x").c_str(), 0); c.y = prefs.getFloat((geometryKey + "y").c_str(), 0);
   }
-  calVersion = prefs.getString("cal", "UNSET"); geomVersion = prefs.getString("geo", ""); geomSet = geomVersion.length() > 0;
+  calVersion = prefs.getString(CAL_VERSION_KEY, "UNSET"); geomVersion = prefs.getString("geo", ""); geomSet = NCELL == 3 && geomVersion.length() > 0;
   knownMass = prefs.getFloat("mass", 500);
+  refreshWeighingCalibration();
 }
 void saveCalibration(const String& version) {
-  for (auto& c : cells) { String k(c.name); prefs.putFloat((k + "z").c_str(), c.zero); prefs.putFloat((k + "k").c_str(), c.cpg); }
-  prefs.putString("cal", version); calVersion = version;
+  for (auto& c : cells) { String k = String(CAL_KEY_PREFIX) + c.name; prefs.putFloat((k + "z").c_str(), c.zero); prefs.putFloat((k + "k").c_str(), c.cpg); }
+  prefs.putString(CAL_VERSION_KEY, version); calVersion = version;
 }
 
 // ---------------- 16x2 LCD on a PCF8574 backpack (minimal driver, our I2C pins only) ----------------
@@ -376,26 +556,74 @@ struct Button {
   }
 } btnPage{BTN_PAGE}, btnAction{BTN_ACTION};
 
-// ---------------- Service mode: on-shelf 3-position calibration ----------------
-enum SvcStep { SVC_OFF, SVC_HOME, CAL_ZERO, CAL_A, CAL_B, CAL_C, CAL_VERIFY, CAL_DONE };
+// ---------------- Service mode: on-shelf 2-position calibration ----------------
 SvcStep svc = SVC_OFF; uint32_t svcActivity = 0, bothSince = 0; bool bothLatched = false;
 Press pendingCalibration = P_NONE;
 SvcStep pendingCalibrationStep = SVC_OFF;
 uint32_t calibrationRequestedAt = 0, calibrationStillSince = 0;
-float newZero[NCELL], capture[NCELL][NCELL], newCpg[NCELL]; String svcMessage;
+float newZero[NCELL], capture[NCELL][NCELL], newCpg[NCELL];
+double newGramsPerCount[NCELL] = {}; String svcMessage;
 int page = 0; constexpr int PAGES = 6;
 String lastUid = "", lastReader = ""; uint32_t lastUidAt = 0;
 
 const char* calibrationStepName() {
-  const char* names[] = {"OFF", "HOME", "EMPTY", "A", "B", "C", "VERIFY", "SAVED"};
+  const char* names[] = {"OFF", "HOME", "EMPTY", "A", "C", "VERIFY", "SAVED"};
   return names[svc];
 }
+// Calibration readiness is based on ADC health, never an obsolete gram scale.
+bool calibrationStillEnough() {
+  for (const auto& c : cells)
+    if (c.n < WINDOW || millis() - c.lastReady > 1000 ||
+        labs(c.last) >= SATURATION_RAW || stdRaw(c) > 400) return false;
+  return true;
+}
+void appendCalibrationState(JsonDocument& d) {
+  auto state = d["calibration_ui"].to<JsonObject>();
+  state["step"] = calibrationStepName();
+  state["pending"] = pendingCalibration != P_NONE;
+  state["message"] = svcMessage;
+  state["still"] = calibrationStillEnough();
+  if (svc == CAL_VERIFY) {
+    double total = 0;
+    for (int i = 0; i < NCELL; ++i)
+      total += (medianRaw(cells[i]) - newZero[i]) * newGramsPerCount[i];
+    state["verify_g"] = total;
+    state["verify_tolerance_g"] = fmaxf(2.0f, knownMass * 0.03f);
+  }
+}
+void enterService();
+void exitService();
+void qcTick(uint32_t now);
+void serviceAction(Press p, const Snap& s);
 #ifdef RFID_DIAGNOSTIC
 bool calibrationConsole(const String& command) {
+  if (command.startsWith("cal ")) {
+    if (command == "cal cancel") { exitService(); svcMessage = "Cancelled; saved calibration kept"; return true; }
+    if (pendingCalibration != P_NONE || manualTare.pending()) {
+      Serial.println("CAL refused: a capture is already pending"); return true;
+    }
+    if (command == "cal empty") {
+      if (svc != SVC_OFF && svc != SVC_HOME && svc != CAL_DONE) {
+        Serial.println("CAL refused: cancel previous calibration first"); return true;
+      }
+      if (prefs.putFloat("mass", 44.0f) != sizeof(float)) {
+        Serial.println("CAL refused: cannot save known mass"); return true;
+      }
+      knownMass = 44.0f; enterService(); svc = CAL_ZERO;
+      serviceAction(P_SHORT, snapshot()); return true;
+    }
+    bool captureRequested = (command == "cal a" && svc == CAL_A) ||
+                            (command == "cal c" && svc == CAL_C);
+    if (captureRequested || (command == "cal save" && svc == CAL_VERIFY)) {
+      svcActivity = millis();
+      serviceAction(captureRequested ? P_SHORT : P_LONG, snapshot()); return true;
+    }
+    Serial.println("CAL refused: wrong step (empty, a, c, save, cancel)"); return true;
+  }
   if (command == "calstatus") {
-    Serial.printf("CAL step=%s mass_g=%.3f version=%s raw_sd=%.1f/%.1f/%.1f\n",
+    Serial.printf("CAL step=%s mass_g=%.3f version=%s raw_sd=%s\n",
                   calibrationStepName(), knownMass, calVersion.c_str(),
-                  stdRaw(cells[0]), stdRaw(cells[1]), stdRaw(cells[2]));
+                  noiseDiagnostic().c_str());
     return true;
   }
   if (!command.startsWith("mass ")) return false;
@@ -416,40 +644,21 @@ bool calibrationConsole(const String& command) {
 }
 #endif
 
-// Solve sum_i R[j][i] * k[i] = M for k = grams per count (Gaussian elimination, partial pivoting).
-bool solveScales(const float R[NCELL][NCELL], float M, float out[NCELL], String& why) {
-  double a[NCELL][NCELL + 1]; double norm = 1;
-  for (int j = 0; j < NCELL; j++) {
-    double rn = 0; for (int i = 0; i < NCELL; i++) { a[j][i] = R[j][i]; rn += R[j][i] * R[j][i]; }
-    a[j][NCELL] = M; norm *= sqrt(rn);
-    if (rn == 0) { why = "NO CHANGE"; return false; }
-  }
-  double det = 1;
-  for (int c = 0; c < NCELL; c++) {
-    int p = c; for (int r = c + 1; r < NCELL; r++) if (fabs(a[r][c]) > fabs(a[p][c])) p = r;
-    if (p != c) { for (int k = 0; k <= NCELL; k++) { double t = a[c][k]; a[c][k] = a[p][k]; a[p][k] = t; } det = -det; }
-    if (a[c][c] == 0) { why = "SINGULAR"; return false; }
-    det *= a[c][c];
-    for (int r = c + 1; r < NCELL; r++) { double f = a[r][c] / a[c][c]; for (int k = c; k <= NCELL; k++) a[r][k] -= f * a[c][k]; }
-  }
-  if (fabs(det) / norm < 0.05) { why = "SPREAD MASSES"; return false; }  // positions too similar
-  double k[NCELL];
-  for (int r = NCELL - 1; r >= 0; r--) { double s = a[r][NCELL]; for (int c = r + 1; c < NCELL; c++) s -= a[r][c] * k[c]; k[r] = s / a[r][r]; }
-  for (int i = 0; i < NCELL; i++) {
-    if (!isfinite(k[i]) || k[i] == 0) { why = "BAD CELL " + String(cells[i].name); return false; }
-    out[i] = 1.0 / k[i];
-    if (fabs(out[i]) < 10 || fabs(out[i]) > 100000) { why = "CHECK CELL " + String(cells[i].name); return false; }
-  }
-  return true;
+// Calibrate only the active supports; each captured position is one matrix row.
+bool solveScales(const float (&R)[NCELL][NCELL], float M, float (&out)[NCELL], String& why) {
+  const char* message = "";
+  bool ok = solveCalibration<NCELL>(R, M, out, message);
+  why = message;
+  return ok;
 }
 bool stillEnough(const Snap& s) {
   if (!s.ready || s.fault) return false;
-  for (auto& c : cells) if (stdRaw(c) > 400) return false;  // ~1 g on a typical 3 kg cell; tune per cell
+  for (int i = 0; i < NCELL; ++i) if (weighing.included(i) && stdRaw(cells[i]) > 400) return false;
   return true;
 }
 void reportCalibration(float verify) {
   JsonDocument d; bus.envelope(d, "CALIBRATION", TRAY_ID, calVersion.c_str());
-  d["calibration"]["method"] = "SERVICE_MODE_3_POSITION"; d["calibration"]["known_mass_g"] = knownMass;
+  d["calibration"]["method"] = CAL_METHOD; d["calibration"]["known_mass_g"] = knownMass;
   d["calibration"]["verify_total_g"] = verify;
   JsonArray arr = d["calibration"]["cells"].to<JsonArray>();
   for (auto& c : cells) { JsonObject o = arr.add<JsonObject>(); o["name"] = String(c.name); o["zero_raw"] = c.zero; o["counts_per_g"] = c.cpg; }
@@ -459,32 +668,41 @@ void applyServiceAction(Press p, const Snap& s) {
   if (svc == SVC_HOME && p == P_SHORT) { svc = CAL_ZERO; return; }
   if (svc == CAL_DONE && p == P_SHORT) { svc = SVC_HOME; return; }
   if (svc >= CAL_ZERO && svc <= CAL_C && p == P_SHORT) {
-    if (!stillEnough(s)) { svcMessage = "NOT STILL - WAIT"; Serial.println("CAL capture refused: wait for stable healthy readings"); return; }
-    Serial.printf("CAL captured %s mass_g=%.3f raw=%ld/%ld/%ld\n",
-                  calibrationStepName(), knownMass, s.raw[0], s.raw[1], s.raw[2]);
-    if (svc == CAL_ZERO) for (int i = 0; i < NCELL; i++) newZero[i] = s.raw[i];
-    else { int j = svc - CAL_A; for (int i = 0; i < NCELL; i++) capture[j][i] = s.raw[i] - newZero[i]; }
+    if (!calibrationStillEnough()) { svcMessage = "NOT STILL - WAIT"; Serial.println("CAL capture refused: wait for stable healthy readings"); return; }
+    String captured;
+    for (int i = 0; i < NCELL; ++i) captured += String(cells[i].name) + "=" + String(s.calibrationRaw[i]) + " ";
+    Serial.printf("CAL captured %s mass_g=%.3f median_counts=%s\n",
+                  calibrationStepName(), knownMass, captured.c_str());
+    if (svc == CAL_ZERO) for (int i = 0; i < NCELL; i++) newZero[i] = s.calibrationRaw[i];
+    else { int j = calibrationRow(svc); if (j < 0 || j >= NCELL) { svc = CAL_ZERO; svcMessage = "BAD CAL STEP"; return; }
+      for (int i = 0; i < NCELL; i++) capture[j][i] = s.calibrationRaw[i] - newZero[i]; }
     svcMessage = "";
     if (svc == CAL_C) {
       String why;
-      if (solveScales(capture, knownMass, newCpg, why)) svc = CAL_VERIFY; else { svcMessage = "FAIL " + why; svc = CAL_ZERO; }
-    } else svc = SvcStep(svc + 1);
+      if (solveScales(capture, knownMass, newCpg, why)) {
+        for (int i = 0; i < NCELL; ++i) newGramsPerCount[i] = 1.0 / double(newCpg[i]);
+        svc = CAL_VERIFY;
+      } else { svcMessage = "FAIL " + why; svc = CAL_ZERO; }
+    } else svc = nextCaptureStep(svc);
     return;
   }
   if (svc == CAL_VERIFY && p == P_LONG) {
-    if (!stillEnough(s)) { svcMessage = "NOT STILL - WAIT"; Serial.println("CAL save refused: readings not stable/healthy"); return; }
-    float verify = 0; for (int i = 0; i < NCELL; i++) verify += (s.raw[i] - newZero[i]) / newCpg[i];
+    if (!calibrationStillEnough()) { svcMessage = "NOT STILL - WAIT"; Serial.println("CAL save refused: readings not stable/healthy"); return; }
+    float verify = 0; for (int i = 0; i < NCELL; i++) verify += (s.calibrationRaw[i] - newZero[i]) * newGramsPerCount[i];
     if (!isfinite(verify) || fabs(verify - knownMass) > fmaxf(2.0f, knownMass * 0.03f)) {
       svcMessage = "VERIFY MASS";
       Serial.printf("CAL save refused: measured %.3f g, expected %.3f g; keep known mass on tray\n", verify, knownMass);
       return;
     }
+    manualTare.clear();
     for (int i = 0; i < NCELL; i++) { cells[i].zero = newZero[i]; cells[i].cpg = newCpg[i]; }
     uint32_t count = prefs.getUInt("calcount", 0) + 1; prefs.putUInt("calcount", count);
-    saveCalibration("dev-" + bus.boot.substring(0, 6) + "-" + String(count));
+    saveCalibration(String(CAL_VERSION_PREFIX) + bus.boot.substring(0, 6) + "-" + String(count));
+    qcReset();
+    refreshWeighingCalibration();
     reportCalibration(verify);
-    Serial.printf("CAL SAVED version=%s mass_g=%.3f verify_g=%.3f counts_per_g=%.6f/%.6f/%.6f\n",
-                  calVersion.c_str(), knownMass, verify, cells[0].cpg, cells[1].cpg, cells[2].cpg);
+    Serial.printf("CAL SAVED version=%s mass_g=%.3f verify_g=%.3f counts_per_g=%s\n",
+                  calVersion.c_str(), knownMass, verify, scaleDiagnostic().c_str());
     svcMessage = calVersion; svc = CAL_DONE;
   }
 }
@@ -507,33 +725,258 @@ void tickCalibrationCapture(const Snap& s, uint32_t now) {
   if (now - calibrationRequestedAt > 20000) {
     pendingCalibration = P_NONE; svcMessage = "UNSTABLE - RETRY";
     Serial.println("CAL request timed out: no stable hands-off window; press ACTION to retry");
+    usbState();
     return;
   }
-  if (btnPage.down || btnAction.down || !stillEnough(s)) { calibrationStillSince = 0; return; }
+  if (btnPage.down || btnAction.down || !calibrationStillEnough()) { calibrationStillSince = 0; return; }
   if (!calibrationStillSince) { calibrationStillSince = now; return; }
   if (now - calibrationStillSince < 1000) return;
   Press action = pendingCalibration; pendingCalibration = P_NONE;
   svcMessage = ""; svcActivity = now;
   applyServiceAction(action, s);
+  usbState();
 }
-void enterService() { svc = SVC_HOME; svcActivity = millis(); svcMessage = ""; Serial.println("SERVICE MODE ON"); }
+// Persist an audit observation before changing the volatile zero reference.
+// This is HEALTH, not a pickup/return: raw samples and calibration remain intact.
+bool recordTareChange(const char* action, float offset) {
+  JsonDocument d; bus.envelope(d, "HEALTH", TRAY_ID, calVersion.c_str());
+  d["evidence_refs"].add(String("MANUAL_TARE:") + action);
+  if (String(action) == "APPLY") d["evidence_refs"].add(tareEmptyRequested ? "TARE_EMPTY_CONFIRMED:1" : "TARE_EMPTY_CONFIRMED:0");
+  d["evidence_refs"].add("TARE_OFFSET_G:" + String(offset, 6));
+  d["evidence_refs"].add("TARE_REF:" + bus.boot + ":" + String(manualTare.count() + (String(action) == "APPLY" ? 1 : 0)));
+  return bus.persist(d);
+}
+void startManualTare(bool emptyConfirmed) {
+  if (svc != SVC_OFF) { tareFeedback("EXIT SERVICE"); Serial.println("TARE_REFUSED service_mode"); return; }
+  if (calVersion == "UNSET") { tareFeedback("CALIBRATE FIRST"); Serial.println("TARE_REFUSED uncalibrated"); return; }
+  tareEmptyRequested = emptyConfirmed;
+  weighing.suspendZeroTracking();
+  manualTare.request(millis());
+  tareMessage = "";
+  Serial.println("TARE_REQUESTED release buttons; waiting for 1 s stable readings");
+}
+void requestManualTare() { startManualTare(false); }
+void requestEmptyTare() { startManualTare(true); }
+void clearManualTare() {
+  if (svc != SVC_OFF) { Serial.println("TARE_REFUSED service_mode"); return; }
+  if (!manualTare.active()) { manualTare.cancel(); tareFeedback("NO TARE ACTIVE"); return; }
+  if (!recordTareChange("CLEAR", manualTare.totalOffset())) {
+    manualTare.cancel(); tareFeedback("NO SPACE - RETRY"); Serial.println("TARE_REFUSED audit_not_saved"); return;
+  }
+  manualTare.clear(); weighing.clearTare(); hold.reset(); stableSince = 0; page = 0;
+  tareFeedback("TARE CLEARED"); Serial.println("TARE_CLEARED calibration unchanged");
+}
+void tickManualTare(Snap& s, uint32_t now) {
+  if (svc != SVC_OFF) { manualTare.cancel(); return; }
+  if (!manualTare.pending()) return;
+  auto result = manualTare.poll(now, btnPage.down || btnAction.down,
+                                s.calibrated && stillEnough(s) && weighing.settled() && s.noise < STABLE_NOISE_G);
+  if (result == ManualTare<NCELL>::TIMED_OUT) {
+    tareFeedback("UNSTABLE - RETRY"); Serial.println("TARE_REFUSED unstable_timeout"); return;
+  }
+  if (result != ManualTare<NCELL>::READY) return;
+  float reference[NCELL], sum = 0;
+  for (int i = 0; i < NCELL; ++i) { reference[i] = weighing.included(i) ? weighing.calibratedAt(i, s.filteredRaw[i]) : 0; sum += reference[i]; }
+  if (!isfinite(sum) || !recordTareChange("APPLY", sum)) {
+    manualTare.cancel(); tareFeedback("NO SPACE - RETRY"); Serial.println("TARE_REFUSED audit_not_saved"); return;
+  }
+  if (!manualTare.apply(reference)) { manualTare.cancel(); tareFeedback("TARE FAILED"); return; }
+  double tareReference[NCELL];
+  for (int i = 0; i < NCELL; ++i) tareReference[i] = reference[i];
+  weighing.setTare(tareReference, tareEmptyRequested);
+  hold.reset();
+  Serial.printf("AZT_EMPTY_CONFIRMED %s\n", tareEmptyRequested ? "yes (operator tareempty)" : "no (loaded-reference tare)");
+  // The raw event baseline is retained: subtracting the same offset from pre/post
+  // cannot invent a weight change or erase a genuine pending load change.
+  stableSince = 0; page = 0; s = snapshot();
+  tareFeedback("ZERO SET");
+  Serial.printf("TARE_APPLIED count=%lu offset_g=%.6f total_g=%.3f calibration=%s (not saved to NVS)\n",
+                (unsigned long)manualTare.count(), sum, s.total, calVersion.c_str());
+}
+void enterService() { if (qcActive()) qcCancel("Service mode"); manualTare.cancel(); svc = SVC_HOME; svcActivity = millis(); svcMessage = ""; Serial.println("SERVICE MODE ON"); }
 void exitService() {
   pendingCalibration = P_NONE;
   svc = SVC_OFF; afterService = true; stableSince = 0;  // a change across service is reported, flagged, never hidden
   Serial.println("SERVICE MODE OFF");
 }
+
+// ---------------- Quick calibration before demos ----------------
+// Under a minute with one known mass and no buttons after Start: empty tray -> mass over
+// A -> moved over C -> moved to the centre -> removed. Each move is detected from the
+// ADC; then the tray must be still for QC_STILL_MS and is measured for QC_WINDOW_MS. All
+// samples are fitted per cell to zero + rate*t + load[position] (drift_check.h): A and C
+// give the gains with the drift during the run removed, and the centre is the independent
+// check. The drift is NOT extrapolated afterwards: it reverses with temperature from
+// minute to minute, so a 50 s trend predicts nothing. The tray is re-zeroed at the fitted
+// zero and confirmed empty, so zero tracking follows the wander from then on. Gains and
+// zeros are saved like a service calibration.
+enum QcStep { QC_OFF, QC_EMPTY1, QC_ON_A, QC_ON_C, QC_CENTRE, QC_EMPTY2, QC_DONE, QC_FAIL };
+const char* QC_STEP_NAMES[] = {"OFF", "EMPTY1", "ON_A", "ON_C", "CENTRE", "EMPTY2", "DONE", "FAIL"};
+enum QcPhase { QC_WAIT_MOVE, QC_WAIT_STILL, QC_MEASURE };
+const char* QC_PHASE_NAMES[] = {"WAIT_MOVE", "WAIT_STILL", "MEASURE"};
+QcStep qcStep = QC_OFF;
+QcPhase qcPhase = QC_WAIT_STILL;
+uint32_t qcStartMs = 0, qcStepAt = 0, qcStillSince = 0, qcCollectAt = 0, qcDoneAt = 0;
+DriftFit<NCELL + 1> qcFit[NCELL];
+// One window is buffered and only committed to the fit if the tray stayed still throughout.
+constexpr int QC_BUFFER = 80;
+struct QcSampleRow { double t; int32_t raw[NCELL]; } qcBuffer[QC_BUFFER];
+int qcBuffered = 0;
+double qcLevel[NCELL] = {}, qcEmptyLevel[NCELL] = {};  // mean counts of the last / first window
+String qcMessage;
+double qcVerifyG = 0, qcRateGMin[NCELL] = {}, qcResidualG[NCELL] = {};
+float qcCountsPerGram[NCELL] = {};
+
+bool qcActive() { return qcStep != QC_OFF && qcStep != QC_DONE && qcStep != QC_FAIL; }
+int qcPosition(QcStep step) { return step == QC_ON_A ? 0 : step == QC_ON_C ? 1 : step == QC_CENTRE ? NCELL : -1; }
+void qcEnter(QcStep step) {
+  qcStep = step; qcStepAt = millis(); qcStillSince = 0; qcBuffered = 0;
+  qcPhase = step == QC_EMPTY1 ? QC_WAIT_STILL : QC_WAIT_MOVE;
+  Serial.printf("QC step=%s\n", QC_STEP_NAMES[step]);
+  usbState();
+}
+void qcReset() { qcStep = QC_OFF; qcMessage = ""; qcDoneAt = 0; }
+void qcFail(const char* why) {
+  qcMessage = why; qcEnter(QC_FAIL);
+  afterService = true; stableSince = 0;
+  Serial.printf("QC FAIL %s (calibration unchanged)\n", why);
+}
+void qcCancel(const char* why) {
+  if (!qcActive()) { Serial.println("QC cancel: no check running"); return; }
+  qcFail(why);
+}
+void qcStart() {
+  if (qcActive()) { Serial.println("QC refused: a check is already running"); return; }
+  if (svc != SVC_OFF || manualTare.pending()) { Serial.println("QC refused: leave calibration/tare first"); return; }
+  for (auto& fit : qcFit) fit.reset();
+  qcMessage = ""; qcStartMs = millis();
+  qcEnter(QC_EMPTY1);
+}
+// Manual override: the move was made but not detected (e.g. a very light mass).
+void qcNext() {
+  if (qcActive() && qcPhase == QC_WAIT_MOVE) { qcPhase = QC_WAIT_STILL; qcStillSince = 0; usbState(); }
+  else Serial.println("QC next refused: not waiting for the mass to be moved");
+}
+void qcSample(const int32_t (&raw)[NCELL], uint32_t now) {
+  if (!qcActive() || qcPhase != QC_MEASURE || qcBuffered >= QC_BUFFER) return;
+  QcSampleRow& row = qcBuffer[qcBuffered++];
+  row.t = uint32_t(now - qcStartMs) / 1000.0;
+  for (int i = 0; i < NCELL; ++i) row.raw[i] = raw[i];
+}
+double qcDistance(const double (&level)[NCELL]) {
+  double sum = 0;
+  for (int i = 0; i < NCELL; ++i) sum += fabs(medianRaw(cells[i]) - level[i]);
+  return sum;
+}
+// The mass must really rest on the tray (or really be off it) before a window counts:
+// a mass still held in the hand leaves a steady but empty-looking tray.
+bool qcInExpectedState() {
+  if (qcStep == QC_EMPTY1) return true;
+  if (qcStep == QC_EMPTY2) return qcDistance(qcEmptyLevel) < qcDistance(qcLevel);
+  return qcDistance(qcEmptyLevel) > QC_MOVE_COUNTS;
+}
+void qcFinish(uint32_t now) {
+  for (auto& fit : qcFit) if (!fit.solve()) { qcFail("FIT FAILED"); return; }
+  QuickCalResult<NCELL> result = evaluateQuickCalibration<NCELL>(qcFit, knownMass);
+  qcVerifyG = result.verifyG;
+  for (int i = 0; i < NCELL; ++i) {
+    qcRateGMin[i] = result.rateGPerMin[i]; qcResidualG[i] = result.residualG[i];
+    qcCountsPerGram[i] = result.countsPerGram[i];
+  }
+  Serial.printf("QC fit mass_g=%.3f centre_g=%.3f counts_per_g A=%.3f C=%.3f drift_g_min A=%.3f C=%.3f residual_g A=%.3f C=%.3f %s\n",
+                knownMass, qcVerifyG, qcCountsPerGram[0], qcCountsPerGram[1], qcRateGMin[0], qcRateGMin[1],
+                qcResidualG[0], qcResidualG[1], result.why);
+  if (!result.ok) { qcFail(result.why); return; }
+  const double t = uint32_t(now - qcStartMs) / 1000.0;
+  for (int i = 0; i < NCELL; ++i) {
+    cells[i].zero = qcFit[i].zeroAt(t);
+    cells[i].cpg = result.countsPerGram[i];
+  }
+  uint32_t count = prefs.getUInt("calcount", 0) + 1; prefs.putUInt("calcount", count);
+  saveCalibration(String(CAL_VERSION_PREFIX) + bus.boot.substring(0, 6) + "-" + String(count) + "q");
+  refreshWeighingCalibration();
+  double empty[NCELL] = {};
+  if (!weighing.setTare(empty, true)) { qcFail("APPLY FAILED"); return; }
+  reportCalibration(qcVerifyG);
+  JsonDocument audit; bus.envelope(audit, "HEALTH", TRAY_ID, calVersion.c_str());
+  audit["evidence_refs"].add("QUICK_CALIBRATION:" + calVersion);
+  for (int i = 0; i < NCELL; ++i) {
+    audit["evidence_refs"].add("QC_DRIFT_G_PER_MIN_" + String(cells[i].name) + ":" + String(qcRateGMin[i], 4));
+    audit["evidence_refs"].add("QC_RESIDUAL_G_" + String(cells[i].name) + ":" + String(qcResidualG[i], 4));
+  }
+  bus.persist(audit);
+  afterService = true; stableSince = 0;
+  qcDoneAt = now; qcMessage = "";
+  qcEnter(QC_DONE);
+  Serial.printf("QC DONE version=%s centre_g=%.3f; empty tray zeroed, zero tracking on\n", calVersion.c_str(), qcVerifyG);
+}
+void qcTick(uint32_t now) {
+  if (!qcActive()) return;
+  if (now - qcStepAt > QC_STEP_TIMEOUT_MS) { qcFail(qcPhase == QC_WAIT_MOVE ? "TIMED OUT" : "NOT STILL"); return; }
+  if (qcPhase == QC_WAIT_MOVE) {
+    if (qcDistance(qcLevel) > QC_MOVE_COUNTS) { qcPhase = QC_WAIT_STILL; qcStillSince = 0; usbState(); }
+    return;
+  }
+  const bool still = !btnPage.down && !btnAction.down && calibrationStillEnough() && qcInExpectedState();
+  if (qcPhase == QC_WAIT_STILL) {
+    if (!still) { qcStillSince = 0; return; }
+    if (!qcStillSince) { qcStillSince = now; return; }
+    if (now - qcStillSince < QC_STILL_MS) return;
+    qcPhase = QC_MEASURE; qcCollectAt = now; qcBuffered = 0;
+    usbState();
+    return;
+  }
+  if (!still) { qcPhase = QC_WAIT_STILL; qcStillSince = 0; qcBuffered = 0; usbState(); return; }  // touched: redo window
+  if (now - qcCollectAt < QC_WINDOW_MS) return;
+  const int position = qcPosition(qcStep);
+  double sum[NCELL] = {};
+  for (int r = 0; r < qcBuffered; ++r)
+    for (int i = 0; i < NCELL; ++i) { qcFit[i].add(qcBuffer[r].t, position, qcBuffer[r].raw[i]); sum[i] += qcBuffer[r].raw[i]; }
+  for (int i = 0; i < NCELL; ++i) qcLevel[i] = qcBuffered ? sum[i] / qcBuffered : medianRaw(cells[i]);
+  if (qcStep == QC_EMPTY1) for (int i = 0; i < NCELL; ++i) qcEmptyLevel[i] = qcLevel[i];
+  Serial.printf("QC measured step=%s samples=%d\n", QC_STEP_NAMES[qcStep], qcBuffered);
+  if (qcStep == QC_EMPTY2) qcFinish(now);
+  else qcEnter(QcStep(qcStep + 1));
+}
+void appendQuickCheckState(JsonDocument& d) {
+  auto qc = d["quick_check"].to<JsonObject>();
+  const uint32_t now = millis();
+  qc["step"] = QC_STEP_NAMES[qcStep];
+  qc["phase"] = QC_PHASE_NAMES[qcPhase];
+  qc["seconds_left"] = qcPhase == QC_MEASURE ? (QC_WINDOW_MS - min(QC_WINDOW_MS, uint32_t(now - qcCollectAt))) / 1000.0 : 0;
+  qc["elapsed_s"] = qcActive() ? uint32_t(now - qcStartMs) / 1000 : 0;
+  qc["message"] = qcMessage;
+  qc["known_mass_g"] = knownMass;
+  if (qcDoneAt) {
+    qc["age_s"] = uint32_t(now - qcDoneAt) / 1000;
+    qc["centre_g"] = qcVerifyG;
+    for (int i = 0; i < NCELL; ++i) {
+      qc["counts_per_g"][String(cells[i].name)] = qcCountsPerGram[i];
+      qc["drift_g_per_min"][String(cells[i].name)] = qcRateGMin[i];
+      qc["residual_g"][String(cells[i].name)] = qcResidualG[i];
+    }
+  }
+}
 void handleButtons(const Snap& s) {
   uint32_t now = millis();
   Press pp = btnPage.poll(now), pa = btnAction.poll(now);
   if (btnPage.down && btnAction.down) {
+    manualTare.cancel();
     if (!bothSince) bothSince = now;
     if (!bothLatched && now - bothSince >= 3000) { bothLatched = true; svc == SVC_OFF ? enterService() : exitService(); }
     return;
   }
   bothSince = 0;
   if (bothLatched) { if (!btnPage.down && !btnAction.down) bothLatched = false; return; }  // ignore the release
+  if (qcActive()) {  // ACTION: "I moved it" if a move was not detected; long PAGE cancels
+    if (pa == P_SHORT) qcNext();
+    if (pp == P_LONG) qcCancel("Cancelled");
+    return;
+  }
   if (svc == SVC_OFF) {
     if (pp == P_SHORT) page = (page + 1) % PAGES;
+    if (pp == P_LONG) clearManualTare();
+    if (pa == P_LONG) requestManualTare();
     if (pa == P_SHORT) { lcdOn = !lcdOn; lcdShown[0] = lcdShown[1] = ""; }  // backlight toggle only
     return;
   }
@@ -545,31 +988,39 @@ void handleButtons(const Snap& s) {
 
 // ---------------- Display ----------------
 String fmtG(float g) { char b[12]; snprintf(b, sizeof b, "%.1f", g); return b; }
+bool renderQuickCheck();
 void render(const Snap& s) {
   if (svc != SVC_OFF) {
     // A rejected capture is retried by ACTION; its old warning must not hide
     // the live readiness prompt after the load cells have settled again.
     if (svcMessage == "NOT STILL - WAIT" && stillEnough(s)) svcMessage = "";
-    const char* titles[] = {"", "SERVICE ACT:cal", "EMPTY BOX  ACT", "MASS ON A  ACT", "MASS ON B  ACT", "MASS ON C  ACT", "VERIFY HOLD ACT", "SAVED ACT:back"};
+    const char* titles[] = {"", "SERVICE ACT:cal", "EMPTY BOX  ACT", "MASS ON A  ACT", "MASS ON C  ACT", "VERIFY HOLD ACT", "SAVED ACT:back"};
     lcdLine(0, titles[svc]);
     if (svcMessage.length()) lcdLine(1, svcMessage);
-    else if (svc == CAL_VERIFY) { float v = 0; for (int i = 0; i < NCELL; i++) v += (s.raw[i] - newZero[i]) / newCpg[i]; lcdLine(1, fmtG(v) + " g of " + fmtG(knownMass)); }
+    else if (svc == CAL_VERIFY) { float v = 0; for (int i = 0; i < NCELL; i++) v += (s.calibrationRaw[i] - newZero[i]) * newGramsPerCount[i]; lcdLine(1, fmtG(v) + " g of " + fmtG(knownMass)); }
     else if (svc == SVC_HOME) lcdLine(1, "mass " + fmtG(knownMass) + " g");
     else lcdLine(1, stillEnough(s) ? "still - press" : "settling...");
     return;
   }
+  if (renderQuickCheck()) return;
+  if (manualTare.pending()) {
+    lcdLine(0, "TARE WAIT..."); lcdLine(1, "RELEASE HANDS"); return;
+  }
+  if (tareMessage.length() && (int32_t)(tareMessageUntil - millis()) > 0) {
+    lcdLine(0, tareMessage); lcdLine(1, fmtG(s.total) + " g"); return;
+  }
   switch (page) {
     case 0:
-      lcdLine(0, s.calibrated ? String(TRAY_ID) + " " + fmtG(s.total) + "g" : String(TRAY_ID) + " UNCALIB");
+      lcdLine(0, s.calibrated ? String(manualTare.active() ? "T " : "") + TRAY_ID + " " + fmtG(s.displayTotal) + "g" : String(TRAY_ID) + " UNCALIB");
       lcdLine(1, s.fault ? s.flags : (stableSince ? "STABLE +-" + fmtG(s.noise) : "SETTLING +-" + fmtG(s.noise)));
       break;
     case 1:
-      lcdLine(0, "A" + fmtG(s.g[0]) + " B" + fmtG(s.g[1]));
-      lcdLine(1, "C" + fmtG(s.g[2]) + (s.calibrated ? " g" : " UNCAL"));
+      lcdLine(0, "A" + fmtG(s.g[0]) + " C" + fmtG(s.g[1]));
+      lcdLine(1, s.calibrated ? "grams per cell" : "UNCALIBRATED");
       break;
     case 2:
-      lcdLine(0, "A" + String(s.raw[0] / 1000) + "k B" + String(s.raw[1] / 1000) + "k");
-      lcdLine(1, "C" + String(s.raw[2] / 1000) + "k raw");
+      lcdLine(0, "A" + String(s.raw[0] / 1000) + "k C" + String(s.raw[1] / 1000) + "k");
+      lcdLine(1, "raw counts");
       break;
     case 3:
       lcdLine(0, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "WiFi down");
@@ -585,6 +1036,21 @@ void render(const Snap& s) {
   }
 }
 
+bool renderQuickCheck() {
+  const uint32_t now = millis();
+  if (!qcActive() && !(qcStep != QC_OFF && now - qcStepAt < 8000)) return false;
+  const String mass = fmtG(knownMass) + "g";
+  const char* titles[] = {"", "QC: TRAY EMPTY", "PUT MASS OVER A", "MOVE IT OVER C", "MOVE TO CENTRE", "TAKE MASS OFF"};
+  if (qcActive()) {
+    lcdLine(0, titles[qcStep]);
+    if (qcPhase == QC_MEASURE)
+      lcdLine(1, "HANDS OFF " + String((QC_WINDOW_MS - min(QC_WINDOW_MS, uint32_t(now - qcCollectAt)) + 999) / 1000) + "s");
+    else lcdLine(1, qcPhase == QC_WAIT_MOVE ? mass + " waiting" : "let go, still...");
+  } else if (qcStep == QC_DONE) { lcdLine(0, "QC OK centre"); lcdLine(1, fmtG(qcVerifyG) + "g of " + mass); }
+  else { lcdLine(0, "QC FAILED"); lcdLine(1, qcMessage); }
+  return true;
+}
+
 // ---------------- Commands from the backend ----------------
 void handleCommand(const String& body, uint32_t now, String& barrierId, uint32_t& barrierRequested) {
   JsonDocument d; if (deserializeJson(d, body)) return;
@@ -594,18 +1060,22 @@ void handleCommand(const String& body, uint32_t now, String& barrierId, uint32_t
   if (action == "CALIBRATE") {
     JsonArray list = d["cells"].as<JsonArray>();
     String version = d["version"].as<String>();
-    if (list.isNull() || list.size() != NCELL) { Serial.println("CALIBRATE refused: 3-cell box needs per-cell zero_raw/counts_per_g"); return; }
+    if (list.isNull() || list.size() != NCELL) { Serial.println("CALIBRATE refused: active cells need zero_raw/counts_per_g"); return; }
     if (version == calVersion || !version.length()) { Serial.println("Duplicate or empty calibration version refused"); return; }
     float z[NCELL], k[NCELL]; bool seen[NCELL] = {false};
     for (JsonObject o : list) for (int i = 0; i < NCELL; i++) if (o["name"].as<String>() == String(cells[i].name)) {
-      z[i] = o["zero_raw"]; k[i] = o["counts_per_g"]; seen[i] = k[i] != 0; }
-    for (bool ok : seen) if (!ok) { Serial.println("CALIBRATE refused: every cell A/B/C needs a non-zero scale"); return; }
+      z[i] = o["zero_raw"]; k[i] = o["counts_per_g"];
+      seen[i] = isfinite(z[i]) && z[i] >= -8388608 && z[i] <= 8388607 &&
+                isfinite(k[i]) && fabs(k[i]) >= 10 && fabs(k[i]) <= 100000; }
+    for (bool ok : seen) if (!ok) { Serial.println("CALIBRATE refused: every active cell needs a non-zero scale"); return; }
+    manualTare.clear();
     for (int i = 0; i < NCELL; i++) { cells[i].zero = z[i]; cells[i].cpg = k[i]; }
-    saveCalibration(version); Serial.println("Calibration " + version + " saved");
+    saveCalibration(version); refreshWeighingCalibration(); qcReset(); Serial.println("Calibration " + version + " saved");
   } else if (action == "GEOMETRY") {
+    if (NCELL < 3) { Serial.println("GEOMETRY refused: A/C mode cannot locate 2D loads"); return; }
     JsonArray list = d["cells"].as<JsonArray>(); int found = 0;
     for (JsonObject o : list) for (auto& c : cells) if (o["name"].as<String>() == String(c.name)) { c.x = o["x_mm"]; c.y = o["y_mm"]; found++; }
-    if (found != NCELL) { Serial.println("GEOMETRY refused: need A, B and C"); loadConfig(); return; }
+    if (found != NCELL) { Serial.println("GEOMETRY refused: need every cell"); loadConfig(); return; }
     geomVersion = d["version"].as<String>(); geomSet = geomVersion.length() > 0;
     for (auto& c : cells) { String k(c.name); prefs.putFloat((k + "x").c_str(), c.x); prefs.putFloat((k + "y").c_str(), c.y); }
     prefs.putString("geo", geomVersion); Serial.println("Geometry " + geomVersion + " saved");
@@ -615,6 +1085,38 @@ void handleCommand(const String& body, uint32_t now, String& barrierId, uint32_t
   }
 }
 
+void debugWeighing(const Snap& s) {
+  static uint32_t last = 0;
+  if (!scaleDebugEnabled || millis() - last < SCALE_DEBUG_INTERVAL_MS) return;
+  last = millis(); const auto& value = weighing.value();
+  // Independent per-channel acquisition trace, even if another cell is missing
+  // or no valid calibration exists. Never substitute filtered data or zero.
+  String rawLine = "RAW sample_ms=" + String(last);
+  for (const auto& c : cells) {
+    rawLine += " raw_" + String(c.name) + "=" + String(c.last);
+    rawLine += " age_" + String(c.name) + "=" + String(last - c.lastReady);
+    rawLine += " valid_" + String(c.name) + "=" + String(c.n > 0);
+  }
+  if (Serial.availableForWrite() >= int(rawLine.length() + 2)) Serial.println(rawLine);
+  if (!weighing.fresh(millis())) return;
+  String line = "WEIGH pair_ms=" + String(value.capturedMs);
+  for (int i = 0; i < NCELL; ++i) {
+    line += " raw_" + String(cells[i].name) + "=" + String(value.raw[i]);
+    line += " ema_" + String(cells[i].name) + "=" + String(value.filteredRaw[i], 3);
+    line += " zero_" + String(cells[i].name) + "=" + String(cells[i].zero + weighing.driftOffsetCounts(i), 3);
+    line += " gain_" + String(cells[i].name) + "=" + String(cells[i].gramsPerCount, 9);
+    line += " net_" + String(cells[i].name) + "=" + String(value.cellGrams[i], 4);
+  }
+  line += " sum_raw_eq=" + String(value.combinedRawCounts, 3);
+  line += " sum_ema_eq=" + String(value.filteredCombinedCounts, 3);
+  line += " calibrated_g=" + String(value.calibratedTotalG, 4);
+  line += " raw_net_g=" + String(value.rawNetG, 4);
+  line += " net_g=" + String(value.netG, 4) + " display_g=" + String(value.displayG, 4);
+  line += " azt_g=" + String(value.zeroCorrectionG, 4) + " tracking=" + String(value.zeroTracking);
+  line += " shown_g=" + String(s.total, 4) + " held_g=" + String(hold.heldTotal(), 4);
+  if (Serial.availableForWrite() >= int(line.length() + 2)) Serial.println(line);
+}
+
 // ---------------- Main ----------------
 uint32_t lastHealth = 0, lastDiag = 0, lastTick = 0, lastRender = 0;
 String barrierId = ""; uint32_t barrierRequested = 0;
@@ -622,6 +1124,11 @@ String barrierId = ""; uint32_t barrierRequested = 0;
 void setup() {
   Serial.setTxBufferSize(4096);
   Serial.begin(115200);
+#ifdef WEIGHING_SELF_TEST
+  const int weighingTestFailure = weighing_self_test::run();
+  weighingSelfTestOK = weighingTestFailure == 0;
+  Serial.printf("WEIGH_SELFTEST %s line=%d\n", weighingSelfTestOK ? "PASS" : "FAIL", weighingTestFailure);
+#endif
 #ifdef RFID_DIAGNOSTIC
   Serial.println("BENCH: r1, r2, both, mass <grams>, calstatus at 115200 with Newline");
 #endif
@@ -675,12 +1182,17 @@ void loop() {
   bus.tick();
   uint32_t now = millis();
   sampleCells();
+  processWeighingSample(svc == SVC_OFF && !btnPage.down && !btnAction.down);
+  qcTick(millis());
+  static uint32_t lastQcState = 0;  // the monitor shows the check's prompts and countdown live
+  if (qcActive() && now - lastQcState >= 1000) { lastQcState = now; usbState(); }
   if (bus.command.length()) { handleCommand(bus.command, now, barrierId, barrierRequested); bus.command = ""; }
   static Snap s; static uint32_t lastSnap = 0;
   if (now - lastSnap >= 50) { lastSnap = now; s = snapshot(); }
   handleButtons(s);
   tickCalibrationCapture(s, millis());
-  if (now - lastTick >= 100) { lastTick = now; if (svc == SVC_OFF) trackWeight(s); }
+  tickManualTare(s, millis());
+  if (now - lastTick >= 100) { lastTick = now; if (svc == SVC_OFF && !qcActive()) trackWeight(s); }
   if (now - lastRender >= 250) { lastRender = now; render(s); }
 
   if (barrierId.length() && bus.empty() && now - barrierRequested > 1500) {
@@ -705,30 +1217,37 @@ void loop() {
   if(dropped) { for(uint32_t i=0;i<dropped;i++) bus.lost();Serial.printf("RFID_BUFFER_OVERFLOW count=%lu\n",(unsigned long)dropped); }
   if (now - lastDiag >= 1000) {
     lastDiag = now;
-    Serial.printf("DIAG raw A=%ld B=%ld C=%ld total=%s noise=%.2f%s rc522=0x%02X/0x%02X scans=%lu/%lu lcd=%s svc=%d wifi=%s mqtt=%s fs=%s\n",
-      s.raw[0], s.raw[1], s.raw[2], s.calibrated ? fmtG(s.total).c_str() : "UNCAL", s.noise, s.flags.length() ? (" flags=" + s.flags).c_str() : "",
+    Serial.printf("DIAG raw %s total=%s noise=%.2f%s rc522=0x%02X/0x%02X scans=%lu/%lu lcd=%s svc=%d wifi=%s mqtt=%s fs=%s\n",
+      rawDiagnostic(s).c_str(), s.calibrated ? fmtG(s.total).c_str() : "UNCAL", s.noise, s.flags.length() ? (" flags=" + s.flags).c_str() : "",
       readerVersion[0], readerVersion[1],
       (unsigned long)readerReadCount[0].load(), (unsigned long)readerReadCount[1].load(), lcdAddr ? "ok" : "none", (int)svc,
       WiFi.status() == WL_CONNECTED ? "up" : "down", bus.mqtt.connected() ? "up" : "down", bus.storageOK ? "ok" : "MISSING");
     Serial.printf("DIAG RFID_QUEUE durable=%u/%u ram=%u scan_gap_max_ms=%lu/%lu historical_overflow=%lu\n",
                   bus.queuedFiles,bus.QUEUE_CAPACITY,rfidObservations?(unsigned)uxQueueMessagesWaiting(rfidObservations):0,
                   (unsigned long)rfidMaxScanGap[0].load(),(unsigned long)rfidMaxScanGap[1].load(),(unsigned long)bus.overflow);
+    // answered = a tag replied to wake-up; read = UID read; failed = replied but the read failed.
+    Serial.printf("DIAG RFID_READERS R1 answered=%lu read=%lu failed=%lu | R2 answered=%lu read=%lu failed=%lu\n",
+                  (unsigned long)readerAnswered[0].load(),(unsigned long)readerReadCount[0].load(),(unsigned long)readerReadFailed[0].load(),
+                  (unsigned long)readerAnswered[1].load(),(unsigned long)readerReadCount[1].load(),(unsigned long)readerReadFailed[1].load());
     if (svc != SVC_OFF) {
       float verify = 0;
-      if (svc == CAL_VERIFY) for (int i = 0; i < NCELL; i++) verify += (s.raw[i] - newZero[i]) / newCpg[i];
-      Serial.printf("CAL step=%s mass_g=%.3f still=%s verify_g=%.3f raw_sd=%.1f/%.1f/%.1f\n",
+      if (svc == CAL_VERIFY) for (int i = 0; i < NCELL; i++) verify += (s.calibrationRaw[i] - newZero[i]) * newGramsPerCount[i];
+      Serial.printf("CAL step=%s mass_g=%.3f still=%s verify_g=%.3f raw_sd=%s\n",
                     calibrationStepName(), knownMass, stillEnough(s) ? "yes" : "no", verify,
-                    stdRaw(cells[0]), stdRaw(cells[1]), stdRaw(cells[2]));
+                    noiseDiagnostic().c_str());
     }
   }
   if (now - lastHealth >= 2000) {  // best-effort live health (not flash-queued); 2 s keeps database growth modest
     lastHealth = now;
     JsonDocument d; bus.envelope(d, "HEALTH", TRAY_ID, calVersion.c_str());
-    String flags = s.flags; if (svc != SVC_OFF) addFlag(flags, "SERVICE_MODE");
+    appendTareEvidence(d);
+    String flags = s.flags; if (manualTare.pending()) addFlag(flags, "TARE_PENDING");
+    if (svc != SVC_OFF) addFlag(flags, "SERVICE_MODE");
+    if (qcActive()) addFlag(flags, "QUICK_CHECK");
     if (flags.length()) { d["sensor_health"]["flags"].add(flags); d["sensor_health"]["ok"] = false; }
     long rawSum = 0; JsonArray arr = d["weight"]["cells"].to<JsonArray>();
     for (int i = 0; i < NCELL; i++) { rawSum += s.raw[i]; JsonObject c = arr.add<JsonObject>(); c["name"] = String(cells[i].name); c["raw"] = s.raw[i]; if (s.calibrated) c["post_g"] = s.g[i]; c["ok"] = millis() - cells[i].lastReady <= 1000; }
-    float pre = 0; for (int i = 0; i < NCELL; i++) pre += baseGrams(i);
+    const double pre = hold.heldTotal();
     d["weight"]["raw"] = rawSum; if (s.calibrated) d["weight"]["filtered"] = s.total; else d["weight"]["filtered"] = nullptr;
     d["weight"]["pre_g"] = pre; d["weight"]["post_g"] = pre; d["weight"]["noise_g"] = s.noise; d["weight"]["settled"] = false;
     String body; serializeJson(d, body); if (bus.mqtt.connected()) bus.mqtt.publish(bus.topic("events").c_str(), body.c_str());
@@ -736,5 +1255,6 @@ void loop() {
     d.remove("device_key");Serial.print("SF_HEALTH ");serializeJson(d,Serial);Serial.println();
 #endif
   }
+  debugWeighing(s);
   delay(1);
 }

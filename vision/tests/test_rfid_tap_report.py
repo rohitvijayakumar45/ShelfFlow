@@ -31,3 +31,15 @@ def test_count_or_storage_failures_cannot_pass(change):
     else:
         rows[-1]['line'] = rows[-1]['line'].replace('historical_overflow=0', 'historical_overflow=8')
     assert not summarize(rows, {'R1': 7, 'R2': 7})['passed']
+
+
+def test_existing_loss_history_is_preserved_but_new_losses_fail():
+    rows = recordings()
+    queue = dict(rows[-1])
+    queue['line'] = queue['line'].replace('historical_overflow=0', 'historical_overflow=67')
+    rows = [queue] + rows[:-1] + [dict(queue)]
+    report = summarize(rows, {'R1': 7, 'R2': 7})
+    assert report['passed'] and report['historical_loss_baseline'] == 67
+    assert report['new_loss_count'] == 0
+    rows[-1]['line'] = rows[-1]['line'].replace('historical_overflow=67', 'historical_overflow=68')
+    assert not summarize(rows, {'R1': 7, 'R2': 7})['passed']

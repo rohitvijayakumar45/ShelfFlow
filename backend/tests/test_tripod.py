@@ -85,6 +85,19 @@ def test_device_calibration_event_sets_tray_version_and_audit():
         assert row.metadata_["source"] == "DEVICE" and row.metadata_["previous"] == "sim-v1" and len(row.metadata_["cells"]) == 3
         assert db.scalar(select(Audit).where(Audit.action == "DEVICE_CALIBRATION"))
 
+
+def test_ac_only_service_calibration_is_recorded_without_cell_b():
+    event = calibration_event('ac-only-1', 1, calibration={
+        'method': 'SERVICE_MODE_2_POSITION', 'known_mass_g': 44, 'verify_total_g': 44.1,
+        'cells': [{'name': 'A', 'zero_raw': 8100, 'counts_per_g': 400},
+                  {'name': 'C', 'zero_raw': 300, 'counts_per_g': -400}]})
+    s.ingest(event)
+    with SessionLocal() as db:
+        assert db.get(Tray, 'tray-a').calibration_version == 'ac-only-1'
+        row = db.scalar(select(Calibration).where(Calibration.tray_id == 'tray-a'))
+        assert row.metadata_['method'] == 'SERVICE_MODE_2_POSITION'
+        assert [cell['name'] for cell in row.metadata_['cells']] == ['A', 'C']
+
 def test_stale_device_calibration_does_not_change_version():
     s.ingest(calibration_event("dev-old", 1, capture_start=time.time() - 3600, capture_end=time.time() - 3600))
     with SessionLocal() as db:

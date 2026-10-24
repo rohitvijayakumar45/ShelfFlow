@@ -19,6 +19,7 @@ import {
   ChartLine,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
+import { Preintegration } from "./Preintegration";
 import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
 
 function Brand() {
@@ -154,7 +155,9 @@ export function Customer() {
     [busy, setBusy] = useState(false),
     [tab, setTab] = useState("cart"),
     [disputeFor, setDisputeFor] = useState("");
-  const [toasts, dismissToast] = useCartToasts(cart?.confirmed_events);
+  const [toasts, dismissToast] = useCartToasts(
+    cart ? [...cart.confirmed_events, ...(cart.assisted_events || [])] : undefined,
+  );
   const disputeBox = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     if (!token) return;
@@ -527,7 +530,7 @@ export function Customer() {
               {t.action === "RETURN" ? "Put back" : "Added"}: <b>{t.name || t.product_id}</b>
               {t.quantity > 1 ? ` × ${t.quantity}` : ""}
             </span>
-            <button
+            {t.weight_verified === false ? <span className="muted">Ask staff if this isn't yours</span> : <button
               className="textbutton"
               onClick={() => {
                 setDisputeFor(t.id);
@@ -537,7 +540,7 @@ export function Customer() {
               }}
             >
               Not mine?
-            </button>
+            </button>}
           </div>
         ))}
       </div>
@@ -602,6 +605,7 @@ function Dispute({
 
 const nav = [
   ["Overview", Storefront],
+  ["Assisted workflow", CheckCircle],
   ["Gate & bracelets", QrCode],
   ["Shelf setup", Tray],
   ["Tray loading", Scales],
@@ -690,7 +694,7 @@ export function Staff() {
           <div className="navnote">
             ONE CAMERA
             <br />
-            Two independently weighed trays
+            {data?.weights_enabled === false ? "Staff-confirmed item movements" : "Weight and camera evidence"}
             <br />
             <b>Physical validation pending</b>
           </div>
@@ -714,6 +718,8 @@ export function Staff() {
             <p>Connecting to store…</p>
           ) : (
             <>
+              {data.weights_enabled === false && <Notice>Weight integration is unavailable. Use Assisted workflow to count stock and confirm item movements. Automatic weight-based cart changes are blocked.</Notice>}
+              {page === "Assisted workflow" && <Preintegration data={data} token={token} action={action} />}
               {page === "Overview" && (
                 <>
                   <div className="metrics">
@@ -903,7 +909,7 @@ export function Staff() {
                 <Setup data={data} action={action} token={token} />
               )}
               {page === "Tray loading" && (
-                <TrayLoading data={data} action={action} token={token} />
+                data.weights_enabled === false ? <Notice>Weight-based loading is unavailable. Use Assisted workflow to record physically counted stock.</Notice> : <TrayLoading data={data} action={action} token={token} />
               )}
               {page === "Products & recognition" && (
                 <>
@@ -2076,6 +2082,92 @@ function lookStatus(status: string | null) {
   if (status === "NO_STILLS") return "no photo (camera off)";
   return "✗ " + status.replace("FAILED:", "").replaceAll("_", " ").toLowerCase();
 }
+// Live camera view for teaching, with a manual capture: each press is a one-view teach
+// session, so the crop goes through the same item detection and quality gate as Teach.
+function TeachCamera({ token, products, refs, sessions, tray, busy, run, action }: {
+  token: string; products: any[]; refs: any[]; sessions: any[]; tray: string; busy: boolean;
+  run: (fn: () => Promise<any>) => Promise<void>; action: Action;
+}) {
+  const [show, setShow] = useState(false),
+    [product, setProduct] = useState(products[0]?.id || ""),
+    [image, setImage] = useState(""),
+    [error, setError] = useState(""),
+    [captureId, setCaptureId] = useState("");
+  useEffect(() => {
+    if (!show) return;
+    let stopped = false,
+      last = "";
+    async function load() {
+      try {
+        const r = await fetch("/api/staff/camera/preview", { headers: { Authorization: `Bearer ${token}` } });
+        if (!r.ok) throw new Error((await r.json()).detail);
+        const blob = await r.blob();
+        if (stopped) return;
+        if (last) URL.revokeObjectURL(last);
+        last = URL.createObjectURL(blob);
+        setImage(last);
+        setError("");
+      } catch (e) {
+        setError(String(e));
+      }
+    }
+    load();
+    const t = setInterval(load, 700);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+      if (last) URL.revokeObjectURL(last);
+    };
+  }, [token, show]);
+  const session = sessions.find((t: any) => t.id === captureId);
+  const capturing = !!session && session.accepted < 1 && session.until > Date.now() / 1000;
+  const result = !session
+    ? ""
+    : session.accepted >= 1
+      ? "✓ View captured and added to the gallery."
+      : capturing
+        ? "Capturing… keep your hand out of the picture."
+        : "Nothing usable was seen. The product needs a box around it in the camera view (not at the very edge), with no hand over it. Adjust and capture again.";
+  const recent = refs.filter((r: any) => r.product_id === product && r.source === "TEACH").slice(-6).reverse();
+  return (
+    <div className="teachcamera">
+      <button className="secondary" onClick={() => setShow(!show)}>{show ? "Hide camera" : "Show camera and capture manually"}</button>
+      {show && (
+        <>
+          <div className="setupgrid">
+            <label>
+              Product
+              <select value={product} onChange={(e) => setProduct(e.target.value)}>
+                {products.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+          </div>
+          {error && <p className="error">{error}</p>}
+          {image && <img src={image} alt="Live tray camera" style={{ maxWidth: 480, width: "100%", display: "block", margin: "12px 0" }} />}
+          <p className="muted">Place the product on {tray} in a new pose, away from the edges, and take your hand away. Capture once the view shows a box around it.</p>
+          <button disabled={busy || capturing || !product || !tray}
+            onClick={() => run(async () => {
+              const r = await action(`/staff/products/${product}/capture`, { tray_id: tray, reason: "Manual teach capture" });
+              setCaptureId(r.teach_id);
+            })}>
+            {capturing ? "Capturing…" : "Capture view"}
+          </button>
+          {result && <p role="status">{result}</p>}
+          {recent.length > 0 && (
+            <div className="refgrid">
+              {recent.map((r: any) => (
+                <figure key={r.id} className={r.status === "ACTIVE" ? "" : "rejected"}>
+                  <CatalogueImage name={r.file} token={token} alt={`Taught view of ${product}`} />
+                  <figcaption>{r.status.toLowerCase()}</figcaption>
+                </figure>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 function ProductsRecognition({ data, action, token }: { data: any; action: Action; token: string }) {
   const [info, setInfo] = useState<any>(null),
     [error, setError] = useState(""),
@@ -2211,7 +2303,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
             </select>
           </label>
         </div>
-        {teaching && (
+        {teaching && teaching.max_refs > 1 && (
           <div className="result" role="status">
             Teaching <b>{data.products.find((p: any) => p.id === teaching.product_id)?.name}</b>: turn it slowly over the tray —
             front, back, sides, tilted, in your hand. {teaching.accepted}/{teaching.max_refs} views kept ·{" "}
@@ -2219,6 +2311,9 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
             <button className="textbutton" onClick={() => run(() => action(`/staff/teach/${teaching.id}/stop`, {}))}>Stop</button>
           </div>
         )}
+        <TeachCamera token={token} products={data.products} refs={refs} sessions={info?.teach_sessions || []}
+          tray={teachTray} busy={busy || !!teaching} run={run} action={action} />
+
         <table>
           <thead>
             <tr><th>Product</th><th>Price</th><th>On shelf</th><th>Weight</th><th>References</th><th></th></tr>

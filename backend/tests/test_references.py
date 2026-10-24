@@ -112,6 +112,22 @@ def test_device_and_staff_endpoints_round_trip():
         assert c.post("/devices/vision-1/gallery-status", headers=dev, json=status).status_code == 200
         assert c.get("/staff/references", headers=h).json()["gallery_status"]["pairs"][0]["a"] == "bar"
 
+def test_manual_capture_keeps_exactly_one_view():
+    with TestClient(app) as c:
+        h = staff_headers(c)
+        dev = {"X-Device-Key": "local-demo-device"}
+        c.post("/staff/catalogue", headers=h, json={"product_id": "lip-balm", "name": "Lip balm", "price_minor": 4900})
+        cap = c.post("/staff/products/lip-balm/capture", headers=h, json={"tray_id": "tray-a", "reason": "manual view"}).json()
+        teach = c.get("/devices/vision-1/config", headers=dev).json()["trays"]["tray-a"]["teach"]
+        assert teach["teach_id"] == cap["teach_id"] and teach["remaining"] == 1 and teach["until"] - time.time() <= 12
+        ok = c.post("/devices/vision-1/references", headers=dev, json={"product_id": "lip-balm", "source": "TEACH", "image_b64": JPEG, "teach_id": cap["teach_id"]})
+        assert ok.status_code == 200
+        assert c.get("/devices/vision-1/config", headers=dev).json()["trays"]["tray-a"]["teach"] is None  # one view, then done
+        again = c.post("/devices/vision-1/references", headers=dev, json={"product_id": "lip-balm", "source": "TEACH", "image_b64": JPEG, "teach_id": cap["teach_id"]})
+        assert again.status_code >= 400
+        session = next(t for t in c.get("/staff/references", headers=h).json()["teach_sessions"] if t["id"] == cap["teach_id"])
+        assert session["accepted"] == 1 and session["max_refs"] == 1
+
 def test_lookalike_and_close_weight_get_strongest_warning():
     refs.save_gallery_status({"version": "g", "products": {}, "live_references": 0, "pairs": [{"a": "bar", "b": "chips", "similarity": 0.92}], "groups": []})
     load_id = unit_tray()

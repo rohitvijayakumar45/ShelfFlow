@@ -9,12 +9,17 @@
 #define WIFI_SSID_3 ""
 #define WIFI_PASSWORD_3 ""
 #endif
+#ifndef WIFI_SSID_4
+#define WIFI_SSID_4 ""
+#define WIFI_PASSWORD_4 ""
+#endif
 
 struct CameraNetwork { const char* ssid; const char* password; };
 static const CameraNetwork cameraNetworks[] = {
   {WIFI_SSID, WIFI_PASSWORD},
   {WIFI_SSID_2, WIFI_PASSWORD_2},
   {WIFI_SSID_3, WIFI_PASSWORD_3},
+  {WIFI_SSID_4, WIFI_PASSWORD_4},
 };
 
 // Connection attempts run asynchronously; no scans or waits in the video loop.

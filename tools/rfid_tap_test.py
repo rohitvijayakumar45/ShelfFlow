@@ -1,4 +1,4 @@
-"""Record physical RFID tap tests without resetting or recalibrating the controller."""
+"""Observe RFID tests through the live USB bridge; direct serial is opt-in for bench use."""
 import argparse
 import json
 from pathlib import Path
@@ -28,35 +28,78 @@ def summarize(rows, expected):
             errors.append(row)
     counts = {r: sum(e['reader'] == r for e in events) for r in ('R1', 'R2')}
     matching = counts == expected
-    healthy = bool(queues) and all(q['historical_overflow'] == 0 for q in queues)
+    baseline = queues[0]['historical_overflow'] if queues else None
+    healthy = bool(queues) and (baseline == 0 or len(queues) >= 2) and all(
+        q['historical_overflow'] == baseline for q in queues)
     return {'expected_taps': expected, 'captured_taps': counts, 'count_matches': matching,
             'passed': matching and healthy and not errors, 'events': events, 'errors': errors,
             'queue_samples': queues,
+            'historical_loss_baseline': baseline,
+            'new_loss_count': queues[-1]['historical_overflow'] - baseline if queues else None,
             'max_dispatch_ms': max((e['dispatch_ms'] for e in events), default=None),
             'scope': 'Counts physical taps performed by the operator; dispatch time starts after RF decoding. '
                      'Not a guarantee against all missed taps, power loss or untested RF conditions.'}
 
 
+def follow_bridge(path, seconds):
+    """Read only new diagnostics; the bridge retains exclusive ownership of COM3."""
+    offset = path.stat().st_size if path.exists() else 0
+    started = time.monotonic()
+    while time.monotonic() - started < seconds:
+        if path.exists():
+            if path.stat().st_size < offset:
+                offset = 0  # Bridge log rotated.
+            with path.open('rb') as source:
+                source.seek(offset)
+                while True:
+                    before = source.tell()
+                    line = source.readline()
+                    if not line.endswith(b'\n'):
+                        source.seek(before)
+                        break
+                    offset = source.tell()
+                    try:
+                        row = json.loads(line)
+                        yield {'received_s': round(time.monotonic() - started, 3), 'line': row['line']}
+                    except (ValueError, KeyError):
+                        continue
+        time.sleep(.05)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', default='COM3')
+    parser.add_argument('--source', choices=['bridge', 'serial'], default='bridge')
+    parser.add_argument('--bridge-root', type=Path, default=Path('data/integration/usb'))
     parser.add_argument('--seconds', type=float, default=60)
     parser.add_argument('--expect-r1', type=int, default=7)
     parser.add_argument('--expect-r2', type=int, default=7)
     parser.add_argument('--output', type=Path, default=Path('data/hardware-backups/rfid-seven-item-test.json'))
     args = parser.parse_args()
-    connection = serial.Serial(port=None, baudrate=115200, timeout=.2)
-    connection.dtr = False
-    connection.rts = False
-    connection.port = args.port
+    connection = None
     rows = []
     started = time.monotonic()
     try:
-        connection.open()
-        connection.reset_input_buffer()
-        connection.write(b'\nboth\ncalstatus\n')
+        if args.source == 'bridge':
+            status_path = args.bridge_root / 'status.json'
+            status = json.loads(status_path.read_text()) if status_path.exists() else {}
+            if not status.get('connected') or time.time() - status.get('last_seen', 0) > 15:
+                raise RuntimeError('Start tools.usb_bridge first; no fresh controller connection was found.')
+            print('Recording through live USB bridge; COM3 ownership and reader mode unchanged.', flush=True)
+            for row in follow_bridge(args.bridge_root / 'rfid-diagnostics.jsonl', args.seconds):
+                rows.append(row)
+                if EVENT.search(row['line']) or any(error in row['line'] for error in ERRORS):
+                    print(row['line'], flush=True)
+        else:
+            connection = serial.Serial(port=None, baudrate=115200, timeout=.2)
+            connection.dtr = connection.rts = False
+            connection.port = args.port
+            connection.open()
+            connection.reset_input_buffer()
+            # Explicit bench mode only. Normal app tests never stop forwarding or change antenna mode.
+            connection.write(b'\nboth\ncalstatus\n')
         pending = b''
-        while time.monotonic() - started < args.seconds:
+        while connection is not None and time.monotonic() - started < args.seconds:
             pending += connection.read(min(max(connection.in_waiting, 1), 4096))
             while b'\n' in pending:
                 raw, pending = pending.split(b'\n', 1)
@@ -67,7 +110,8 @@ def main():
                         print(line, flush=True)
             pending = pending[-4096:]
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
         report = summarize(rows, {'R1': args.expect_r1, 'R2': args.expect_r2})
         report['serial_rows'] = rows
         args.output.parent.mkdir(parents=True, exist_ok=True)

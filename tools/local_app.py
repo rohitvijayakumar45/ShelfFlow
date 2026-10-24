@@ -77,6 +77,16 @@ def main():
         import sys
         import runpy
         camera=os.getenv('PHYSICAL_CAMERA_URL','http://10.92.123.251')
+        # Camera tuning is not stored on the camera: re-apply the measured best setting at every start.
+        # 8 MHz / 640x480 / quality 12 gave ~10 fps; 20 MHz hung the camera, quality 10 fell below 1 fps.
+        clock,quality,fps,resolution=os.getenv('CAMERA_TUNE','8,12,20,640x480').split(',')
+        try:
+            import httpx
+            httpx.post(camera.rstrip('/')+'/tune',headers={'X-Camera-Key':os.environ['CAMERA_KEY']},timeout=10,
+                       params={'clock_mhz':clock,'quality':quality,'fps':fps,'resolution':resolution}).raise_for_status()
+            print(f'Camera tuned: {resolution} {clock} MHz quality {quality}',flush=True)
+        except Exception as exc:
+            print('Camera tuning not applied ('+type(exc).__name__+'); continuing with the camera default',flush=True)
         sys.argv=['vision.run','--camera',camera,'--camera-key',os.environ['CAMERA_KEY'],
                   '--config',str(LOCAL/'vision-config.json'),'--item-weights','models/shelf-pilot-item-detector.pt',
                   '--gallery','models/shelf-pilot-gallery.npz','--device','cuda:0','--transport','stream',

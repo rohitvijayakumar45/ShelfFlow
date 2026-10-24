@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 MODE = os.getenv("SHELFFLOW_MODE", "simulation")
+WEIGHTS_ENABLED = os.getenv("WEIGHTS_ENABLED", "true").lower() not in ("false", "0", "no")
 if MODE not in ('simulation','hardware'):
     raise RuntimeError('SHELFFLOW_MODE must be simulation or hardware')
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./shelfflow.db")

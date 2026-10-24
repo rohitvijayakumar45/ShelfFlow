@@ -46,6 +46,8 @@ export type Cart = {
   bracelet: { id: string; state: string } | null;
   receipt: any;
   mode: string;
+  weights_enabled?: boolean;
+  assisted_events?: any[];
   confirmed_events: any[];
   corrections: any[];
 };

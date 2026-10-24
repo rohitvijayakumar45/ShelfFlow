@@ -40,7 +40,7 @@ class CellCalibration(StrictModel):
 
 class CalibrationReport(StrictModel):
     """A calibration performed on the device (staff service mode), reported for the audit trail."""
-    method: Literal["SERVICE_MODE_3_POSITION", "COMMAND"]
+    method: Literal["SERVICE_MODE_3_POSITION", "SERVICE_MODE_2_POSITION", "COMMAND"]
     known_mass_g: float = Field(gt=0)
     cells: list[CellCalibration] = Field(min_length=1, max_length=8)
     verify_total_g: float | None = None

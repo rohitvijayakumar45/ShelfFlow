@@ -169,3 +169,17 @@ def test_hand_labels_become_class_one_and_are_never_products(tmp_path):
     assert (root / "labels" / "train" / "f1.txt").read_text().count("\n") == 2  # originals untouched
     make_yaml(tmp_path / "crops", [], tmp_path / "d.yaml", True, with_hands=True)
     assert "1: hand" in (tmp_path / "d.yaml").read_text()
+
+def test_without_scale_only_items_moved_by_a_hand_become_candidates():
+    from vision.hands import movement_candidates
+    summary = pickup_story()
+    matched = {1: Match("vicks", 0.82, 0.2, "sunscreen", "vicks", "sunscreen")}
+    out = movement_candidates(summary, matched, "clip")
+    assert len(out) == 1 and out[0].product_id == "vicks" and out[0].sku and out[0].action == "PICKUP"
+    assert out[0].marker_ids == [7] and out[0].hand_product and out[0].trajectory and out[0].similarity == 0.82
+    unknown = movement_candidates(summary, {}, "clip")
+    assert unknown[0].product_id == "UNKNOWN" and not unknown[0].sku
+    still = MotionProof(ROI, start=0.0)
+    for i in range(10):
+        still.observe(i * 0.1, [(3, (180, 180, 220, 230))], [(170, 170, 240, 250)] if i < 5 else [], [])
+    assert movement_candidates(still.summary(), {}, "clip") == []  # touched but never left: nothing to review

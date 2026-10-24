@@ -1,5 +1,6 @@
 """Forward the controller's durable USB queue; ACK only after matching backend commit."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,19 @@ import time
 import httpx
 import serial
 from dotenv import load_dotenv
+
+
+def record_diagnostic(path, line):
+    # Never put credentials or complete device payloads in the tap-test log.
+    prefixes = ('WEIGH_SELFTEST ', 'WEIGH ', 'RAW ', 'CAL ', 'CALC ', 'AZT_', 'TARE_', 'DIAG RFID', 'RFID MODE ', 'RF TUNE ', 'RFID_BUFFER_OVERFLOW',
+                'RFID_PERSIST_FAILED', 'QUEUE_OVERFLOW', 'QUEUE_WRITE_FAILED', 'RFID_TASK_FAILED')
+    if not line.startswith(prefixes):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > 10_000_000:
+        path.replace(path.with_suffix('.previous.jsonl'))
+    with path.open('a', encoding='utf-8') as output:
+        output.write(json.dumps({'received_s': time.time(), 'line': line}) + '\n')
 
 
 def atomic_json(path, value):
@@ -22,6 +36,22 @@ def atomic_json(path, value):
         except PermissionError:
             if attempt==9:raise
             time.sleep(.02*(attempt+1))  # Windows readers/indexers briefly hold rename locks.
+
+
+def consume_monitor_command(root, connection, latest_state):
+    """One-shot, short-lived local tare request; never accept arbitrary UART text."""
+    path = root / 'monitor-zero-request.json'
+    try:
+        request = json.loads(path.read_text(encoding='utf-8'))
+        path.unlink()  # Consume before dispatch: reconnects must never replay a tare.
+    except (FileNotFoundError, PermissionError, ValueError):
+        return
+    action = request.get('action')
+    allowed = {'tareempty', 'cal empty', 'cal a', 'cal c', 'cal save', 'cal cancel', 'qc start', 'qc next', 'qc cancel'}
+    if (action in allowed
+            and request.get('boot_id') == latest_state.get('boot_id')
+            and 0 <= time.time() - request.get('created_s', 0) <= 10):
+        connection.write(('\n' + action + '\nusbstatus\n').encode('ascii'))
 
 
 class EventStore:
@@ -70,6 +100,9 @@ def run(args):
     connection.dtr = connection.rts = False
     connection.port = args.port
     connection.open()
+    # A cancelled bench experiment may have left one antenna selected. Normal
+    # application operation always starts with both readers, without resetting.
+    connection.write(b'\nboth\n')
     pending = b''
     ready = False
     next_pull = next_state = next_retry = next_status = 0.0
@@ -77,11 +110,20 @@ def run(args):
     latest_state = {}
     reported_boots = set()
     status = {'connected': False, 'delivered': 0, 'last_error': None}
+    event_future = health_future = None
+    latest_health = None
+    diagnostics_file = root / 'rfid-diagnostics.jsonl'
     print('USB controller bridge starting', flush=True)
-    with httpx.Client(base_url='http://127.0.0.1:8000', timeout=3, trust_env=False) as client:
+    # Only this loop owns COM3. Separate clients/workers keep slow HTTP requests
+    # from pausing the serial receiver or delaying tap diagnostics.
+    with httpx.Client(base_url='http://127.0.0.1:8000', timeout=3, trust_env=False) as client, \
+         httpx.Client(base_url='http://127.0.0.1:8000', timeout=3, trust_env=False) as health_client, \
+         ThreadPoolExecutor(max_workers=2) as workers:
         try:
             while True:
                 now = time.monotonic()
+                if ready:
+                    consume_monitor_command(root, connection, latest_state)
                 if now >= next_state:
                     connection.write(b'\nusbstatus\n')
                     next_state = now + 5
@@ -92,6 +134,10 @@ def run(args):
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
                     text = line.decode(errors='replace').strip()
+                    try:
+                        record_diagnostic(diagnostics_file, text)
+                    except OSError:
+                        pass  # Optional test logging must not interrupt durable delivery.
                     try:
                         if 'SF_STATE ' in text:
                             latest_state = json.loads(text.split('SF_STATE ', 1)[1])
@@ -109,6 +155,11 @@ def run(args):
                             if raw['device_id'] != 'sensor-1':
                                 raise ValueError('Unexpected device scope')
                             inflight = store.prepare(raw)
+                        elif 'SF_IDLE' in text and latest_state.get('boot_id') and latest_state['boot_id'] not in reported_boots:
+                            # Nothing deliverable is left (the count can include incomplete .tmp files after a
+                            # reset): report the saved calibration now so the backend adopts it.
+                            connection.write(b'calreport\n')
+                            reported_boots.add(latest_state['boot_id'])
                         elif 'SF_HEALTH ' in text:
                             raw = json.loads(text.split('SF_HEALTH ', 1)[1])
                             if ready and raw['boot_id'] in store.offsets:
@@ -116,25 +167,37 @@ def run(args):
                                 event['capture_start'] = event['capture_end'] = store.offsets[raw['boot_id']] + raw['monotonic_ms'] / 1000
                                 event['clock_synced'] = False
                                 event['clock_uncertainty_ms'] = max(1000, event['clock_uncertainty_ms'])
-                                try:
-                                    client.post('/devices/sensor-1/events', json=event, headers={'X-Device-Key': key}).raise_for_status()
-                                except httpx.HTTPError:
-                                    pass  # HEALTH is best effort, never a controller ACK.
+                                latest_health = event  # Coalesce health; never build an unbounded HTTP queue.
                         elif 'SF_ERROR' in text:
                             status['last_error'] = text[-120:]
                     except (ValueError, KeyError):
                         status['last_error'] = 'Invalid USB protocol response'
                 pending = pending[-65536:]
-                if inflight is not None and now >= next_retry:
+                if event_future is not None and event_future.done():
                     try:
-                        if store.deliver(inflight, client, key):
+                        if event_future.result():
                             connection.write(('ack ' + inflight['event_id'] + '\n').encode())
                             status['delivered'] += 1
                             status['last_error'] = None
                             inflight = None
-                    except (httpx.HTTPError, ValueError):
+                        else:
+                            status['last_error'] = 'Backend ACK mismatch; retained on controller'
+                    except (httpx.HTTPError, ValueError, OSError):
                         status['last_error'] = 'Backend unavailable or event rejected; retained on controller'
+                    event_future = None
                     next_retry = time.monotonic() + 1
+                if inflight is not None and event_future is None and now >= next_retry:
+                    event_future = workers.submit(store.deliver, inflight, client, key)
+                if health_future is not None and health_future.done():
+                    try:
+                        health_future.result().raise_for_status()
+                    except httpx.HTTPError:
+                        pass  # HEALTH is best effort, never a controller ACK.
+                    health_future = None
+                if latest_health is not None and health_future is None:
+                    health_future = workers.submit(health_client.post, '/devices/sensor-1/events',
+                                                  json=latest_health, headers={'X-Device-Key': key})
+                    latest_health = None
                 if now>=next_status:
                     try:atomic_json(root / 'status.json', status)
                     except PermissionError:pass # A transient status-file lock must not stop capture.

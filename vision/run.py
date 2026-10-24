@@ -168,7 +168,7 @@ def run(args):
     try:
         while True:
             camera_failed=False
-            if time.monotonic()-last_config>10:
+            if time.monotonic()-last_config>2:  # fast enough for a short manual capture window
                 try:
                     remote=api.get('/devices/vision-1/config');remote.raise_for_status()
                     for tray,settings in remote.json()['trays'].items():
@@ -176,6 +176,10 @@ def run(args):
                             config['trays'][tray]['roi']=settings['roi']
                             config['trays'][tray]['load_open']=settings.get('load_open',False)
                             config['trays'][tray]['teach']=settings.get('teach')
+                    if 'weights_enabled' in remote.json():
+                        # Backend decides: with the scale off, collections start on motion/RFID and only
+                        # moved items become candidates (staff then confirm them in the assisted workflow).
+                        config['weight_driven']=bool(remote.json()['weights_enabled'])
                     tuned=remote.json().get('recognition')
                     if identifier and tuned:
                         # Staff-approved thresholds (from reviewed events); applied live, recorded on every event.
@@ -244,13 +248,21 @@ def run(args):
             now=time.monotonic()
             for tray,collector in list(active.items()):
                 if now<collector['finish']:continue
+                summary=collector['proof'].summary()
+                weight=collector['weight']
+                if not config.get('weight_driven') and not weight:
+                    # No scale: only items that left/arrived under a hand become candidates. A window
+                    # with no such movement (someone walked past, hand hovered) is dropped, not reviewed.
+                    from vision.hands import movement_candidates
+                    collector['candidates']=movement_candidates(summary,{tid:m for (t,tid),m in track_matches.items() if t==tray},collector['id'])
+                    if not collector['candidates']:
+                        del active[tray];continue
                 seq+=1;cooldown[tray]=now
                 refs=capture.buffer.preserve(args.evidence,collector['id'],collector['start'],now,redact=redact)
                 if collector.get('sensor_event'):refs.append('SENSOR_EVENT:'+collector['sensor_event'].event_id)
-                f=last_frame;sensor=collector.get('sensor_event');weight=collector['weight']
+                f=last_frame;sensor=collector.get('sensor_event')
                 candidates=collector['candidates']
-                summary=collector['proof'].summary()
-                action='PICKUP' if not weight or weight.post_g<weight.pre_g else 'RETURN'
+                action=candidates[0].action if candidates and not weight else ('PICKUP' if not weight or weight.post_g<weight.pre_g else 'RETURN')
                 if config.get('weight_driven') and weight:
                     after=product_history[tray][-1][1] if product_history[tray] else []
                     candidates=review_weight_candidates(collector['before_products'],after,collector['id'],action)

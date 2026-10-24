@@ -1,0 +1,113 @@
+{
+ "train": "data/shelf-pilot/objects/train",
+ "test": "data/shelf-pilot/objects/val",
+ "products": {
+  "sanitizer": 48,
+  "sunscreen": 43,
+  "vicks": 41
+ },
+ "test_crops": {
+  "sanitizer": 16,
+  "sunscreen": 16,
+  "vicks": 18
+ },
+ "rows": [
+  {
+   "embedder": "dinov2-small",
+   "model": "facebook/dinov2-small",
+   "mask": "none",
+   "available": true,
+   "ms_per_crop": 6.7,
+   "top1@1": 0.756,
+   "top1@3": 0.868,
+   "top1@10": 0.942,
+   "top1@all": 0.96,
+   "auroc@3": 0.891,
+   "known@5%@3": 0.704,
+   "wrong@5%@3": 0.005,
+   "threshold@3": 0.7,
+   "auroc@all": 0.93,
+   "known@5%@all": 0.82,
+   "wrong@5%@all": 0.0,
+   "threshold@all": 0.738
+  },
+  {
+   "embedder": "dinov2-small",
+   "model": "facebook/dinov2-small",
+   "mask": "grabcut",
+   "available": true,
+   "ms_per_crop": 6.5,
+   "top1@1": 0.86,
+   "top1@3": 0.898,
+   "top1@10": 0.918,
+   "top1@all": 0.92,
+   "auroc@3": 0.927,
+   "known@5%@3": 0.766,
+   "wrong@5%@3": 0.015,
+   "threshold@3": 0.593,
+   "auroc@all": 0.976,
+   "known@5%@all": 0.86,
+   "wrong@5%@all": 0.01,
+   "threshold@all": 0.671
+  },
+  {
+   "embedder": "dinov2-small",
+   "model": "facebook/dinov2-small",
+   "mask": "sam",
+   "available": true,
+   "ms_per_crop": 6.5,
+   "top1@1": 0.564,
+   "top1@3": 0.84,
+   "top1@10": 0.876,
+   "top1@all": 0.94,
+   "auroc@3": 0.885,
+   "known@5%@3": 0.593,
+   "wrong@5%@3": 0.011,
+   "threshold@3": 0.659,
+   "auroc@all": 0.937,
+   "known@5%@all": 0.82,
+   "wrong@5%@all": 0.02,
+   "threshold@all": 0.692
+  },
+  {
+   "embedder": "dinov2-base",
+   "available": false,
+   "error": "dinov2-base: OSError: facebook/dinov2-base does not appear to have a file named pytorch_model.bin, model.safetensors, tf_model.h5, model.ckpt or flax_model.msgpack."
+  },
+  {
+   "embedder": "siglip2-base",
+   "available": false,
+   "error": "siglip2-base: OSError: google/siglip2-base-patch16-224 does not appear to have a file named pytorch_model.bin, model.safetensors, tf_model.h5, model.ckpt or flax_model.msgpack."
+  },
+  {
+   "embedder": "clip-base",
+   "available": false,
+   "error": "clip-base: OSError: openai/clip-vit-base-patch16 does not appear to have a file named pytorch_model.bin but there is a file for Flax weights. Use `from_flax=True` to load this model from those weights."
+  },
+  {
+   "embedder": "dinov3-small",
+   "available": false,
+   "error": "dinov3-small: OSError: You are trying to access a gated repo.\nMake sure to have access to it at https://huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m.\n401 Client Error. (Request ID: Root=1-6ad8f4c3-16216ec3341c051"
+  }
+ ],
+ "best": {
+  "embedder": "dinov2-small",
+  "model": "facebook/dinov2-small",
+  "mask": "grabcut",
+  "available": true,
+  "ms_per_crop": 6.5,
+  "top1@1": 0.86,
+  "top1@3": 0.898,
+  "top1@10": 0.918,
+  "top1@all": 0.92,
+  "auroc@3": 0.927,
+  "known@5%@3": 0.766,
+  "wrong@5%@3": 0.015,
+  "threshold@3": 0.593,
+  "auroc@all": 0.976,
+  "known@5%@all": 0.86,
+  "wrong@5%@all": 0.01,
+  "threshold@all": 0.671
+ },
+ "note": "Frame-level single crops; known@5% uses a threshold chosen on the same queries (optimistic). Ranking aid only."
+}

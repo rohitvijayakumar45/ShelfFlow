@@ -2626,6 +2626,7 @@
       "type": "string",
       "enum": [
        "SERVICE_MODE_3_POSITION",
+       "SERVICE_MODE_2_POSITION",
        "COMMAND"
       ],
       "title": "Method"

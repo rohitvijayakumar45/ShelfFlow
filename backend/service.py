@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from backend.db import SessionLocal
 from backend.models import *
 from backend.config import MODE
+from backend import config as settings
 from backend.fusion import evaluate, evaluate_units, unit_tolerance
 from backend.schemas import DeviceEvent
 
@@ -151,11 +152,16 @@ def cart(db, session_id):
             "total_minor": sum(i["quantity"] * i["price_minor"] for i in items), "currency": "INR",
             "pending": [{"id": h.id, "tray_id": h.tray_id, "reasons": h.reason, "status": h.status} for h in pending],
             "bracelet": {"id": bracelet.id, "state": bracelet.state} if bracelet else None,
-            "receipt": receipt.content if receipt else None, "mode": MODE,
+            "receipt": receipt.content if receipt else None, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED,
             "confirmed_events": [{"id":h.id,"action":h.proposal.get("action"),"product_id":h.proposal.get("product_id"),"quantity":h.proposal.get("quantity"),
                                   "name":(db.get(Product,h.proposal.get("product_id")).name if h.proposal.get("product_id") and db.get(Product,h.proposal.get("product_id")) else h.proposal.get("product_id")),
                                   "at":(db.get(SensorEvent,h.event_id).payload["capture_end"] if db.get(SensorEvent,h.event_id) else None)} for h in confirmed],
-            "corrections": [{"id":c.id,**c.detail} for c in corrections]}
+            "corrections": [{"id":c.id,**c.detail} for c in corrections],
+            "assisted_events": [{"id":a.id,"action":"PICKUP" if a.payload['quantity_delta']>0 else "RETURN",
+                "product_id":a.payload['product_id'],"quantity":abs(a.payload['quantity_delta']),
+                "name":(db.get(Product,a.payload['product_id']).name if db.get(Product,a.payload['product_id']) else a.payload['product_id']),
+                "at":a.created,"weight_verified":False} for a in db.scalars(select(AssistedAction).where(
+                    AssistedAction.session_id==s.id, AssistedAction.kind=='MOVE').order_by(AssistedAction.created))]}
 
 def correct(hypothesis_id, session_id, product_id, quantity_delta, inventory_delta, reason, key, actor, unit_ids=None):
     with transaction() as db:
@@ -331,6 +337,8 @@ def ingest(event: DeviceEvent):
                 veto, proposals, scores = evaluate(event, product, bindings, MODE == "simulation")
             source_reasons,_=source_vetoes(db,row.id,tray.id)
             veto.extend(source_reasons)
+            if not settings.WEIGHTS_ENABLED:
+                veto.append('WEIGHT_INTEGRATION_DISABLED_STAFF_CONFIRMATION_REQUIRED')
             if late or stale:
                 veto.append("LATE_OR_OUT_OF_ORDER")
             if tray.calibration_version != event.calibration_version:
@@ -384,6 +392,8 @@ def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
         if h.status == "DISPUTED" and decision == "CONFIRM":
             fail("Confirmed dispute requires separate audited correction; dismiss to uphold charge")
         if decision == "CONFIRM":
+            if not settings.WEIGHTS_ENABLED:
+                fail('Weight integration is unavailable; record the physically observed item in Assisted workflow')
             proposal = {**h.proposal, "session_id": session_id, "quantity": quantity}
             if "action" not in proposal:
                 fail("No observed action to confirm; use reconciliation correction")
@@ -431,7 +441,8 @@ def checkout(session_id, key, outcome, assisted, reason, actor):
         db.add(Payment(id=key, order_id=order.id, state=outcome))
         if outcome == "SUCCESS":
             order.status, s.status = "PAID", "COMPLETE"
-            db.add(Receipt(order_id=order.id, content={"order_id": order.id, "session_id": session_id, "items": order.snapshot, "total_minor": order.total_minor, "currency": "INR", "payment": "SIMULATED", "created": time.time()}))
+            db.add(Receipt(order_id=order.id, content={"order_id": order.id, "session_id": session_id, "items": order.snapshot, "total_minor": order.total_minor, "currency": "INR", "payment": "SIMULATED", "created": time.time(),
+                "workflow": "SENSOR_REVIEW" if settings.WEIGHTS_ENABLED else "ASSISTED_NO_WEIGHTS", "weight_verified": settings.WEIGHTS_ENABLED}))
         audit(db, actor, "SIMULATED_PAYMENT", {"session_id": session_id, "outcome": outcome, "assisted": assisted, "reason": reason})
         emit(db, f"cart/{s.id}", {"version": s.cart_version, "status": s.status})
         return {"payment_id": key, "state": outcome, "order_id": order.id}
@@ -527,6 +538,8 @@ def set_unit_tracking(tray_id, enabled, reason, actor):
         return {"tray_id": tray.id, "unit_tracking": enabled}
 
 def open_load(tray_id, reason, actor):
+    if not settings.WEIGHTS_ENABLED:
+        fail('Weight integration is unavailable; use staff-counted stock in Assisted workflow')
     with transaction() as db:
         tray = get(db, Tray, tray_id)
         if not tray.unit_tracking:
@@ -540,6 +553,8 @@ def open_load(tray_id, reason, actor):
         return {"load_id": load.id, "tray_id": tray.id, "started": load.started}
 
 def add_unit(load_id, product_id, weight_event_id, spot, crop_refs, actor):
+    if not settings.WEIGHTS_ENABLED:
+        fail('Weight integration is unavailable; no measured units can be created')
     with transaction() as db:
         load = get(db, TrayLoad, load_id)
         if load.status != "OPEN":

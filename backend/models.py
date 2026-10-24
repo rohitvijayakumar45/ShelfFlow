@@ -131,6 +131,23 @@ class TrayUnit(Base):
     created: Mapped[float] = mapped_column(Float, default=time.time)
     updated: Mapped[float] = mapped_column(Float, default=time.time)
 
+class AssistedStock(Base):
+    """Temporary, staff-counted stock; never represented as weighed TrayUnits."""
+    __tablename__ = "assisted_stock"
+    tray_id: Mapped[str] = mapped_column(ForeignKey("trays.id"), primary_key=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), primary_key=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AssistedAction(Base):
+    __tablename__ = "assisted_actions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    kind: Mapped[str] = mapped_column(String)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("shopping_sessions.id"), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class Calibration(Base):
     __tablename__ = "calibrations"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)

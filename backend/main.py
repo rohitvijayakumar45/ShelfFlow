@@ -14,6 +14,7 @@ from backend.models import *
 from backend.schemas import StrictModel, DeviceEvent, Weight, CellCalibration
 from backend.auth import issue, decode, staff, customer,hash_password,verify_password
 from backend.config import MODE, STAFF_PASSWORD
+from backend import config as settings
 from backend.db import SessionLocal
 from pydantic import Field
 from typing import Literal
@@ -44,7 +45,9 @@ class Login(StrictModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "mode": MODE, "physical_validation": False, "ownership": "REVIEW_FIRST" if MODE != "simulation" else "MOCK"}
+    return {"ok": True, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED,
+            "workflow": "SENSOR_REVIEW" if settings.WEIGHTS_ENABLED else "ASSISTED_NO_WEIGHTS",
+            "physical_validation": False, "ownership": "REVIEW_FIRST" if MODE != "simulation" else "MOCK"}
 
 @app.post("/auth/customer")
 def login_customer(body: Login):
@@ -127,7 +130,7 @@ def vision_config(x_device_key: str = Header()):
             now=time.time()
             teach=db.scalar(select(TeachSession).where(TeachSession.tray_id==t.id,TeachSession.status=='ACTIVE',TeachSession.until>now,TeachSession.accepted<TeachSession.max_refs))
             trays[t.id]["teach"]={"teach_id":teach.id,"product_id":teach.product_id,"until":teach.until,"remaining":teach.max_refs-teach.accepted} if teach else None
-        return {"trays":trays,"recognition":recognition_settings(db)}
+        return {"trays":trays,"recognition":recognition_settings(db),"weights_enabled":settings.WEIGHTS_ENABLED}
 
 class Checkout(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=100)
@@ -203,7 +206,84 @@ def state(user=Depends(staff)):
         result['recent_taps']=[{'event_id':e.id,'captured':e.payload['capture_end'],
                                'uid':next((r[5:] for r in e.payload['evidence_refs'] if r.startswith('RFID:')),None),
                                'reader':next((r[12:] for r in e.payload['evidence_refs'] if r.startswith('RFID_READER:')),None)} for e in recent]
-        return {**result, "mode": MODE}
+        result['assisted_stock'] = [serialize(o) for o in db.scalars(select(AssistedStock))]
+        result['assisted_actions'] = [serialize(o) for o in db.scalars(select(AssistedAction).order_by(AssistedAction.created.desc()).limit(50))]
+        return {**result, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED}
+
+
+class CountedStock(Reason):
+    tray_id: str
+    product_id: str
+    quantity: int = Field(ge=0, le=1000)
+    physical_confirmed: bool
+    idempotency_key: str = Field(min_length=1, max_length=100)
+
+
+class AssistedMove(Reason):
+    tray_id: str
+    product_id: str
+    session_id: str
+    quantity_delta: int = Field(ge=-10, le=10)
+    physical_confirmed: bool
+    idempotency_key: str = Field(min_length=1, max_length=100)
+
+
+@app.post('/staff/preintegration/stock')
+def count_assisted_stock(body: CountedStock, user=Depends(staff)):
+    from backend.preintegration import record
+    values = body.model_dump(); key = values.pop('idempotency_key')
+    return record(key, 'COUNT', values, user['sub'])
+
+
+@app.post('/staff/preintegration/move')
+def record_assisted_move(body: AssistedMove, user=Depends(staff)):
+    from backend.preintegration import record
+    if body.quantity_delta == 0:
+        svc.fail('Choose a pickup or return quantity')
+    values = body.model_dump(); key = values.pop('idempotency_key')
+    return record(key, 'MOVE', values, user['sub'])
+
+
+class EvidenceMove(Reason):
+    product_id: str
+    session_id: str
+    quantity_delta: int = Field(ge=-10, le=10)
+    physical_confirmed: bool
+    idempotency_key: str = Field(min_length=1, max_length=100)
+
+
+@app.get('/staff/preintegration/suggestions')
+def assisted_suggestions(user=Depends(staff)):
+    """Pending camera interactions as pre-filled movements (camera product, motion direction, bracelet owner)."""
+    from backend.preintegration import suggestions
+    with SessionLocal() as db:
+        return suggestions(db)
+
+
+@app.post('/staff/preintegration/from-evidence/{hypothesis_id}')
+def assisted_from_evidence(hypothesis_id: str, body: EvidenceMove, user=Depends(staff)):
+    from backend.preintegration import from_evidence
+    if body.quantity_delta == 0:
+        svc.fail('Choose a pickup or return quantity')
+    values = body.model_dump(); key = values.pop('idempotency_key')
+    return from_evidence(hypothesis_id, values, key, user['sub'])
+
+
+@app.get('/staff/preintegration/camera')
+def preintegration_camera(user=Depends(staff)):
+    import httpx
+    url = os.getenv('CAMERA_URL', 'http://127.0.0.1:8766')
+    try:
+        response = httpx.get(url.rstrip('/')+'/status', timeout=2, trust_env=False)
+        response.raise_for_status()
+        status = response.json()
+        age = status.get('frame_age_s')
+        fresh = status.get('connected') is True and age is not None and age <= 2
+        return {'available': fresh, 'frame_age_s': age,
+                'predictions': status.get('predictions', []) if fresh else [],
+                'automatic_cart_changes': False}
+    except (httpx.HTTPError, ValueError):
+        return {'available': False, 'predictions': [], 'automatic_cart_changes': False}
 
 class SimInteraction(StrictModel):
     session_id: str
@@ -671,6 +751,16 @@ class Teach(Reason):
 @app.post("/staff/products/{product_id}/teach")
 def start_teach(product_id: str, body: Teach, user=Depends(staff)):
     return refs.start_teach(product_id, body.tray_id, body.seconds, body.max_refs, body.reason, user["sub"])
+
+class Capture(Reason):
+    tray_id: str
+
+@app.post("/staff/products/{product_id}/capture")
+def capture_view(product_id: str, body: Capture, user=Depends(staff)):
+    """Manual capture: a one-view teach session. The next usable item crop on the tray (same
+    quality gate as teach) becomes one reference; nothing is kept if none appears within 12 s
+    (vision picks the request up within ~2 s)."""
+    return refs.start_teach(product_id, body.tray_id, 12, 1, body.reason, user["sub"])
 
 @app.post("/staff/teach/{teach_id}/stop")
 def stop_teach(teach_id: str, user=Depends(staff)):

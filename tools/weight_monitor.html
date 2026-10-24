@@ -1,0 +1,97 @@
+<!doctype html>
+
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>ShelfFlow · Live load cells</title>
+
+<style>
+
+*{box-sizing:border-box}body{margin:0;background:#f3f5f5;color:#172526;font:15px system-ui,sans-serif}main{max-width:1400px;margin:auto;padding:32px}h1{font-size:30px;margin:0 0 8px}p{color:#526264;line-height:1.6}.top{display:flex;justify-content:space-between;align-items:center;gap:20px}.status{font-weight:600;color:#136a55}.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin:24px 0}article,.total{background:white;border:1px solid #dce3e2;border-radius:12px;padding:22px}h2{margin:0 0 20px;font-size:19px}.number{font:600 36px ui-monospace,monospace;letter-spacing:-1px}.label{font-size:12px;color:#657477;text-transform:uppercase;letter-spacing:.7px}dl{display:grid;grid-template-columns:1fr auto;gap:12px;margin-top:24px}dt{color:#526264}dd{margin:0;font-family:ui-monospace,monospace}canvas{width:100%;height:150px;display:block;margin-top:20px}.muted{color:#899393}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}button{background:#173f39;color:white;border:0;border-radius:7px;padding:11px 16px;font:inherit;cursor:pointer}select{padding:9px;border:1px solid #ccd5d3;border-radius:6px;background:white}.calibration{background:white;border:1px solid #dce3e2;border-radius:12px;padding:22px;margin-top:24px}.controls button:disabled{opacity:.4;cursor:default}.total{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}.notice{background:#fff4da;border:1px solid #ead8a7;border-radius:8px;padding:14px 18px;color:#695522}.foot{font-size:13px}.qcprompt{font-size:20px;font-weight:600;color:#172526}@media(max-width:900px){.cards{grid-template-columns:1fr}.top{align-items:start;flex-direction:column}main{padding:20px}}
+
+</style>
+
+<main><div class="top"><div><h1>Live load cells</h1><p>Raw ADC counts before filtering, tare, calibration or gram conversion.</p></div><span id="status" class="status">Connecting…</span></div>
+
+<div class="controls"><button id="zero">Zero empty tray</button><span id="zeroStatus" role="status" aria-live="polite"></span><button id="reset">Start drift reference now</button><label>Chart window <select id="window"><option value="60">1 minute</option><option value="300" selected>5 minutes</option><option value="1800">30 minutes</option></select></label><span id="reference" class="foot">Reference: first fresh sample</span></div>
+
+<section class="calibration" id="quick"><h2>Quick calibration before a demo · 44 g, under a minute</h2><p>Press Start, then follow the prompt: tray empty, mass over A (left), over C (right), at the centre, then off. Each move is detected on its own; just let go each time. It recalibrates both cells, checks the centre, and zeros the empty tray; the zero then follows temperature drift automatically while the tray is empty. Best accuracy for about 5 minutes.</p><div class="controls"><button id="qcStart">Start</button><button id="qcCancel">Cancel</button><button id="qcNext" disabled title="Only if a move was not detected">I moved it</button></div><p id="qcPrompt" class="qcprompt" role="status" aria-live="polite">Reading controller state…</p><p id="qcResult" class="foot"></p></section><section class="calibration"><h2>Step-by-step calibration (fallback) · one 44 g weight</h2><p>Capture the empty tray, then move the <b>same 44 g weight</b> over the left cell (A), then over the right cell (C). Release it and keep hands off for every capture. Finally move it to the centre for an independent check and save.</p><div class="controls"><button data-cal="cal empty">1 · Capture empty tray</button><button data-cal="cal a">2 · Capture 44 g over A</button><button data-cal="cal c">3 · Capture 44 g over C</button><button data-cal="cal save">4 · Verify centre &amp; save</button><button data-cal="cal cancel">Cancel / leave calibration</button></div><p id="calStatus" role="status" aria-live="polite">Reading controller calibration state…</p><p class="foot">Each capture records both raw channels. The solver fits one fixed gain per cell so their sum equals 44 g at both positions. Empty capture alone does not save a new calibration. The centre check must pass within ±2 g before saving; unstable, missing or saturated channels block capture.</p></section><div class="cards" id="cards"></div>
+
+<div class="total"><div><div class="label">Weight on tray · re-tared every 2 s</div><div class="number" id="total">—</div></div><div><div class="label">Fixed calibration · drift included</div><div class="number" id="untared">—</div></div><div><div class="label">Current tare offset</div><div class="number" id="tare">—</div></div></div>
+
+<p class="notice" id="notice">Waiting for live A and C readings from the controller…</p>
+
+<p class="foot">Raw drift = current ADC count − reference ADC count. Range and noise use the selected chart window. Drift in grams is shown separately and uses the stored calibration. Changing the drift reference only changes this window; it does not tare or recalibrate the ESP32. Samples arrive about once per second. Keep the load unchanged when checking drift.</p></main>
+
+<script>
+
+const $=id=>document.getElementById(id);let baseline=null,resetAt=Date.now()/1000,boot=null,lastData=null,zeroRequest=null,calRequest=null;
+
+const fmt=(v,n=0)=>Number.isFinite(v)?v.toLocaleString('en-IN',{minimumFractionDigits:n,maximumFractionDigits:n}):'—';
+
+for(const cell of ['A','C']){$('cards').insertAdjacentHTML('beforeend',`<article><h2>Cell ${cell} <small class="muted" id="state${cell}"></small></h2><div class="label">Raw ADC · integer counts</div><div class="number" id="raw${cell}">—</div><dl><dt>Raw drift from reference</dt><dd id="drift${cell}">—</dd><dt>Raw range · max − min</dt><dd id="range${cell}">—</dd><dt>Raw noise · standard deviation</dt><dd id="noise${cell}">—</dd><dt>Raw drift per minute · trend</dt><dd id="rate${cell}">—</dd><dt>Calculated net contribution</dt><dd id="grams${cell}">—</dd><dt>Drift converted to grams</dt><dd id="gdrift${cell}">—</dd></dl><canvas id="chart${cell}"></canvas><div class="foot muted" id="chartlabel${cell}">Raw ADC drift in counts · time →</div></article>`)}
+
+function chart(cell,rows){const canvas=$('chart'+cell),dpr=devicePixelRatio||1,w=canvas.clientWidth,h=150;canvas.width=w*dpr;canvas.height=h*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);const key='raw_'+cell,points=rows.filter(r=>Number.isFinite(r[key]));if(!points.length)return;let lo=Math.min(...points.map(r=>r[key])),hi=Math.max(...points.map(r=>r[key]));const span=Math.max(hi-lo,2),start=points[0].time,duration=Math.max(points.at(-1).time-start,1);c.strokeStyle='#dce5e3';c.beginPath();c.moveTo(0,20);c.lineTo(w,20);c.moveTo(0,h-20);c.lineTo(w,h-20);c.stroke();c.fillStyle='#657477';c.font='11px system-ui';c.fillText(fmt(hi),3,13);c.fillText(fmt(lo),3,h-3);c.strokeStyle=cell==='A'?'#127a69':'#476fbe';c.lineWidth=2;c.beginPath();points.forEach((r,i)=>{let x=(r.time-start)/duration*w,y=20+(hi-r[key])/span*(h-40);i?c.lineTo(x,y):c.moveTo(x,y)});c.stroke()}
+
+function render(data){lastData=data;const rows=data.samples,last=rows.at(-1),age=last?data.now-last.time:Infinity,active=data.controller.active_cells||[];if(boot!==null&&boot!==data.controller.boot_id){baseline=null;resetAt=data.now}boot=data.controller.boot_id;
+
+const fresh=data.connected&&age<4;
+
+renderCalibration(data,fresh);
+renderQuick(data,fresh);
+
+if(zeroRequest){const state=data.controller;if(state.boot_id!==zeroRequest.boot_id){$('zeroStatus').textContent='Controller restarted; zero not confirmed.';zeroRequest=null}else if(state.tare_count>zeroRequest.tare_count&&state.tare_active&&state.azt_empty_confirmed){$('zeroStatus').textContent='Zero set. You can place the item now.';zeroRequest=null;baseline=null;resetAt=data.now}else if(Date.now()-zeroRequest.started>30000){$('zeroStatus').textContent='Zero not confirmed. Keep tray still and retry.';zeroRequest=null}}
+
+$('zero').disabled=!fresh||!!zeroRequest||QC_RUNNING.includes(data.controller.quick_check?.step)||!!data.controller.tare_pending||!['OFF',undefined].includes(data.controller.calibration_ui?.step);
+
+$('status').textContent=fresh?`Live · ${age.toFixed(1)} s ago`:`No fresh data · ${Number.isFinite(age)?Math.round(age)+' s ago':'waiting for bridge'}`;$('status').style.color=fresh?'#136a55':'#a25b19';
+
+if(!baseline&&fresh&&last.time>=resetAt){baseline=last;$('reference').textContent='Reference: '+new Date(last.time*1000).toLocaleTimeString()}
+
+const recent=rows.filter(r=>r.time>=Math.max(last?.time||0, data.now)-Number($('window').value)&&(!baseline||r.time>=baseline.time));
+
+for(const cell of ['A','C']){const key='raw_'+cell,available=!!last&&Number.isFinite(last[key])&&last['valid_'+cell]!==0;const cellFresh=fresh&&(last?.['age_'+cell]??0)<1000;$('state'+cell).textContent=available?(cellFresh?'live':'stale · last sample'):'waiting for ADC';const items=available?recent.filter(r=>Number.isFinite(r[key])&&r['valid_'+cell]!==0):[],values=items.map(r=>r[key]);const delta=available&&baseline&&Number.isFinite(baseline[key])&&baseline['valid_'+cell]!==0?last[key]-baseline[key]:NaN;let noise=NaN,rate=NaN;if(values.length){let mean=values.reduce((a,b)=>a+b,0)/values.length;noise=Math.sqrt(values.reduce((s,v)=>s+(v-mean)**2,0)/values.length);let ts=items.map(r=>r.time-items[0].time),mt=ts.reduce((a,b)=>a+b,0)/ts.length;let den=ts.reduce((s,t)=>s+(t-mt)**2,0);if(den)rate=60*ts.reduce((s,t,i)=>s+(t-mt)*(values[i]-mean),0)/den}
+
+$('raw'+cell).textContent=available?fmt(last[key]):'—';$('drift'+cell).textContent=fmt(delta)+' counts';$('range'+cell).textContent=(values.length?fmt(Math.max(...values)-Math.min(...values)):'—')+' counts';$('noise'+cell).textContent=fmt(noise,1)+' counts';$('rate'+cell).textContent=fmt(rate,1)+' counts/min';$('grams'+cell).textContent=fmt(available?last['net_'+cell]:NaN,2)+' g';$('gdrift'+cell).textContent=fmt(available?delta*last['gain_'+cell]:NaN,2)+' g';chart(cell,items)}
+
+$('total').textContent=fmt(last?.shown_g??last?.net_g,2)+' g';$('untared').textContent=fmt(last?.calibrated_g,2)+' g';$('tare').textContent=fmt(data.controller.tare_offset_g,2)+' g';$('notice').textContent=data.controller.active_cells?.join(',')!=='A,C'?'The controller is not running the two-cell A/C firmware: upload it before calibrating.':'A (left) and C (right) are sampled independently. Raw ADC readings remain visible during calibration and even if the other channel fails. Calibration: '+(data.controller.calibration_version||'unknown')+' | TOTAL = A + C.'}
+
+function renderCalibration(data,fresh){const state=data.controller.calibration_ui||{},step=state.step||'OFF';
+
+if(calRequest){if(data.controller.boot_id!==calRequest.boot){$('calStatus').textContent='Controller restarted; repeat calibration.';calRequest=null}else if(!state.pending&&((step===calRequest.expected)||(state.message&&state.message!==calRequest.oldMessage)||Date.now()-calRequest.started>30000)){calRequest=null}}
+
+const steps={'cal empty':['OFF','HOME','SAVED'],'cal a':['A'],'cal c':['C'],'cal save':['VERIFY'],'cal cancel':['HOME','EMPTY','A','C','VERIFY','SAVED']};
+
+for(const button of document.querySelectorAll('[data-cal]')){button.disabled=!fresh||data.controller.active_cells?.join(',')!=='A,C'||!steps[button.dataset.cal].includes(step)||!!calRequest||(!!state.pending&&button.dataset.cal!=='cal cancel')||!!data.controller.tare_pending||QC_RUNNING.includes(data.controller.quick_check?.step)}
+
+const prompts={OFF:'Ready: empty the tray and capture step 1.',HOME:'Ready: empty the tray and capture step 1.',EMPTY:'Capturing empty tray. Keep hands off.',A:'Empty captured. Place 44 g over A (left), then capture step 2.',C:'A captured. Move the same 44 g over C (right), then capture step 3.',VERIFY:'A/C captured. Move 44 g to the centre, then verify and save.',SAVED:'Calibration saved. Remove the weight and check zero; then leave calibration.'};
+
+let message=prompts[step]||step;if(state.pending||calRequest)message='Waiting for a stable hands-off capture… '+message;if(state.message)message+=' '+state.message;if(Number.isFinite(state.verify_g))message+=' Centre check: '+fmt(state.verify_g,2)+' g / 44 g (tolerance ±'+fmt(state.verify_tolerance_g,1)+' g).';$('calStatus').textContent=message;
+
+}
+
+for(const button of document.querySelectorAll('[data-cal]')){button.onclick=async()=>{const action=button.dataset.cal;button.disabled=true;try{const response=await fetch('/api/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});if(!response.ok)throw Error('Request rejected ('+response.status+'). Refresh and check the current step.');await response.json();calRequest={boot:lastData.controller.boot_id,started:Date.now(),oldMessage:lastData.controller.calibration_ui?.message,expected:{'cal empty':'A','cal a':'C','cal c':'VERIFY','cal save':'SAVED','cal cancel':'OFF'}[action]};$('calStatus').textContent='Request sent. Keep hands off…'}catch(e){$('calStatus').textContent=e.message}}}
+
+const QC_RUNNING=['EMPTY1','ON_A','ON_C','CENTRE','EMPTY2'];let qcRequest=null;
+const QC_FAILURES={'MOVED - REPEAT':'something moved or was touched while it was measuring','SPREAD MASSES':'the readings over A and over C were too similar: put the mass right over each cell','NO CHANGE':'the mass was not seen on one of the cells','CHECK CELL':'a cell gave an impossible gain: check its wiring','CENTRE CHECK':'the centre reading did not match the mass: put it at the centre and repeat','DRIFT TOO FAST':'a cell is drifting faster than 6 g/min: check the tray is not touching anything','NOT STILL':'the tray never settled','TIMED OUT':'the mass was not moved within 30 s','FIT FAILED':'not enough readings were collected','Cancelled':'it was cancelled','Service mode':'service mode was opened'};
+function renderQuick(data,fresh){const q=data.controller.quick_check||{},step=q.step||'OFF',phase=q.phase,mass=fmt(q.known_mass_g??44)+' g',running=QC_RUNNING.includes(step);
+if(qcRequest&&(data.controller.boot_id!==qcRequest.boot||step!==qcRequest.step||phase!==qcRequest.phase||Date.now()-qcRequest.started>8000))qcRequest=null;
+const where={EMPTY1:'Keep the tray EMPTY',ON_A:`Put the ${mass} mass right over cell A (LEFT)`,ON_C:'Move the mass right over cell C (RIGHT)',CENTRE:'Move the mass to the CENTRE',EMPTY2:'Take the mass OFF the tray'}[step];
+let prompt;
+if(running){const n=QC_RUNNING.indexOf(step)+1;prompt=`Step ${n} of 5 · ${where}. `+(phase==='MEASURE'?`Hands off: ${Math.ceil(q.seconds_left||0)} s.`:phase==='WAIT_STILL'?'Let go and keep still…':'Waiting for you to move it…')}
+else if(step==='DONE'){const minutes=(q.age_s||0)/60;prompt=minutes<5?`Calibrated ${fmt(minutes,1)} min ago. The empty tray is kept at zero automatically.`:`Calibrated ${fmt(minutes,0)} min ago. Temperature drift builds up: run the quick calibration again before weighing.`}
+else if(step==='FAIL')prompt='Quick calibration failed: '+(QC_FAILURES[q.message]||q.message)+'. Nothing was changed: take the mass off and start again.';
+else prompt='Before a demo: empty the tray, hands off, then press Start.';
+if(!fresh)prompt='Controller not connected.';$('qcPrompt').textContent=prompt;
+$('qcResult').textContent=Number.isFinite(q.centre_g)?`Last calibration ${fmt((q.age_s||0)/60,1)} min ago: centre check ${fmt(q.centre_g,2)} g of ${mass}; gain A ${fmt(q.counts_per_g?.A,1)}, C ${fmt(q.counts_per_g?.C,1)} counts/g; zero drift A ${fmt(q.drift_g_per_min?.A,2)} g/min, C ${fmt(q.drift_g_per_min?.C,2)} g/min; fit scatter A ${fmt(q.residual_g?.A,2)} g, C ${fmt(q.residual_g?.C,2)} g.`:'';
+const busy=!fresh||!!qcRequest;$('qcStart').disabled=busy||running||(data.controller.calibration_ui?.step||'OFF')!=='OFF';
+$('qcNext').disabled=busy||!running||phase!=='WAIT_MOVE';$('qcCancel').disabled=busy||!running}
+async function qcSend(action){const q=lastData.controller.quick_check||{};for(const id of ['qcStart','qcNext','qcCancel'])$(id).disabled=true;try{const response=await fetch('/api/qc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});if(!response.ok)throw Error('Request rejected ('+response.status+'). Wait a moment and retry.');await response.json();qcRequest={boot:lastData.controller.boot_id,step:q.step||'OFF',phase:q.phase,started:Date.now()}}catch(e){$('qcPrompt').textContent=e.message}}
+$('qcStart').onclick=()=>qcSend('qc start');$('qcNext').onclick=()=>qcSend('qc next');$('qcCancel').onclick=()=>qcSend('qc cancel');
+$('zero').onclick=async()=>{ $('zero').disabled=true;$('zeroStatus').textContent='Keep the tray empty and hands off…';try{const response=await fetch('/api/zero',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(!response.ok)throw Error('Request rejected ('+response.status+')');zeroRequest={...await response.json(),started:Date.now()}}catch(e){$('zeroStatus').textContent=e.message;$('zero').disabled=false}};
+
+$('reset').onclick=()=>{baseline=null;resetAt=Date.now()/1000;$('reference').textContent='Waiting for next fresh sample…'};$('window').onchange=()=>lastData&&render(lastData);
+
+async function poll(){try{const response=await fetch('/api/readings');if(!response.ok)throw Error(response.status);render(await response.json())}catch(e){$('status').textContent='Monitor disconnected'}finally{setTimeout(poll,1000)}}poll();
+
+</script></html>
+

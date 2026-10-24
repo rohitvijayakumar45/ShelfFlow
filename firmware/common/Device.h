@@ -25,11 +25,22 @@ class DeviceBus {
   uint32_t seq=0, overflow=0, nextRetry=0, backoff=1000, lastPublish=0;
   static constexpr unsigned QUEUE_CAPACITY = 256;
   unsigned queuedFiles=0;
+  // Queued event paths ("/<stem>.json") ordered by sequence number. Built once at boot and kept
+  // current on persist/ACK, so finding the oldest event never rescans the flash directory
+  // (a scan of ~180 files took seconds and stalled the whole controller loop).
+  std::deque<String> pending;
   bool storageOK=false, wifiStarted=false;
   uint32_t wifiStartAt=0;
   DeviceBus(const char* device):id(device){}
   void lost(){overflow++;if(overflow==1||(overflow&(overflow-1))==0)diagnostics.putUInt("overflow",overflow);}
   String topic(const char* suffix){return "shelfflow/devices/"+id+"/"+suffix;}
+  static long seqOf(const String& path){return path.substring(path.lastIndexOf('-')+1,path.length()-5).toInt();}
+  void track(const String& path){
+    auto at=pending.end();
+    while(at!=pending.begin()&&seqOf(*(at-1))>seqOf(path))--at;  // usually appends: new events have the highest sequence
+    pending.insert(at,path);
+  }
+  void untrack(const String& path){for(auto it=pending.begin();it!=pending.end();++it)if(*it==path){pending.erase(it);return;}}
   bool acknowledgeEvent(const String& event){
     if(!storageOK || !event.startsWith(id+"-") || event.indexOf('/')>=0)return false;
     bool removed=false;
@@ -39,7 +50,7 @@ class DeviceBus {
         auto error=deserializeJson(saved,f);f.close();
         if(error || saved["event_id"].as<String>()!=event)return false;
         if(!LittleFS.remove(path.c_str()))return false;
-        if(queuedFiles)queuedFiles--;removed=true;
+        if(queuedFiles)queuedFiles--;removed=true;untrack(path);
       }
     }
     return removed;
@@ -47,11 +58,9 @@ class DeviceBus {
 #ifdef USB_RUNTIME
   void usbNext(){
     if(!storageOK){Serial.println("SF_ERROR storage_unavailable");return;}
-    File root=LittleFS.open("/");File f=root.openNextFile();String oldest="";long oldestSeq=-1;
-    while(f){String name=f.name();if(!f.isDirectory()&&name.endsWith(".json")){long n=name.substring(name.lastIndexOf('-')+1,name.length()-5).toInt();if(oldestSeq<0||n<oldestSeq){oldestSeq=n;oldest=name;}}f.close();f=root.openNextFile();}
-    root.close();
-    if(!oldest.length()){Serial.println("SF_IDLE");return;}
-    String path=oldest.startsWith("/")?oldest:"/"+oldest;
+    while(!pending.empty()&&!LittleFS.exists(pending.front().c_str()))pending.pop_front();  // removed elsewhere
+    if(pending.empty()){Serial.println("SF_IDLE");return;}
+    String path=pending.front();
     File queued=LittleFS.open(path.c_str(),"r");JsonDocument d;auto error=deserializeJson(d,queued);queued.close();
     if(error){Serial.println("SF_ERROR invalid_queued_json");return;}
     d.remove("device_key"); // USB host reads its credential locally; never print it.
@@ -63,7 +72,7 @@ class DeviceBus {
     diagnostics.begin("sfdiag",false);overflow=diagnostics.getUInt("overflow",0);
     storageOK=LittleFS.begin(false); // Never silently format away unacknowledged events.
     if(!storageOK)Serial.println("LittleFS missing. Initialize explicitly; evidence queue disabled.");
-    if(storageOK){File root=LittleFS.open("/");File f=root.openNextFile();while(f){String name=f.name();if(name.endsWith(".json")||name.endsWith(".tmp"))queuedFiles++;if(name.endsWith(".tmp")){lost();Serial.println("Incomplete event after reboot: assisted reconciliation required");}f.close();f=root.openNextFile();}}
+    if(storageOK){File root=LittleFS.open("/");File f=root.openNextFile();while(f){String name=f.name();if(name.endsWith(".json")||name.endsWith(".tmp"))queuedFiles++;if(!f.isDirectory()&&name.endsWith(".json"))track(name.startsWith("/")?name:"/"+name);if(name.endsWith(".tmp")){lost();Serial.println("Incomplete event after reboot: assisted reconciliation required");}f.close();f=root.openNextFile();}root.close();}
 #ifdef DEVICE_OFFLINE
     WiFi.mode(WIFI_OFF); // Bench diagnosis only: isolates sensor wiring from Wi-Fi supply peaks.
     Serial.println("DEVICE_OFFLINE build: Wi-Fi/MQTT disabled");
@@ -111,10 +120,10 @@ class DeviceBus {
     mqtt.loop();
     if(command.length()==0&&!incomingCommands.empty()){command=incomingCommands.front();incomingCommands.pop_front();}
     if(storageOK&&mqtt.connected()&&now-lastPublish>=500){
-      // Send the oldest queued sequence first. LittleFS name order is lexicographic ("-10" before "-9").
-      lastPublish=now;File root=LittleFS.open("/");File f=root.openNextFile();String oldest="";long oldestSeq=-1;
-      while(f){String name=f.name();if(name.endsWith(".json")){long s=name.substring(name.lastIndexOf('-')+1,name.length()-5).toInt();if(oldestSeq<0||s<oldestSeq){oldestSeq=s;oldest=name;}}f=root.openNextFile();}
-      if(oldest.length()){File queued=LittleFS.open(("/"+oldest).c_str(),"r");if(queued){String data=queued.readString();queued.close();mqtt.publish(topic("events").c_str(),data.c_str());}}
+      // Send the oldest queued sequence first (from the in-memory index, never a directory scan).
+      lastPublish=now;
+      while(!pending.empty()&&!LittleFS.exists(pending.front().c_str()))pending.pop_front();
+      if(!pending.empty()){File queued=LittleFS.open(pending.front().c_str(),"r");if(queued){String data=queued.readString();queued.close();mqtt.publish(topic("events").c_str(),data.c_str());}}
     }
   }
   void envelope(JsonDocument& d,const char* type,const char* tray,const char* calibration){
@@ -149,6 +158,7 @@ class DeviceBus {
     if(!renamed){
       lost();Serial.printf("QUEUE_WRITE_FAILED bytes=%u expected=%u rename=%s: evidence retained for review\n",(unsigned)written,(unsigned)expected,written==expected?"failed":"not_attempted");return false;
     }
+    track(path+".json");
     return true;
   }
 #if defined(DEVICE_OFFLINE) && defined(RFID_DIAGNOSTIC) && !defined(USB_RUNTIME)
