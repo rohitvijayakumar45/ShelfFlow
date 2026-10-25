@@ -3,8 +3,7 @@ import { ArrowRight, CheckCircle, GraduationCap, Scales, Users, VideoCamera, War
 import { API, call, money } from "./api";
 import { MjpegView } from "./Live";
 import { TrainProducts } from "./Training";
-import { HelpTheCamera, ShelfMap } from "./Insights";
-import { SuggestionCard } from "./Preintegration";
+import { AuthImage, EvidencePlayer, HelpTheCamera, ShelfMap, Suggestion } from "./Insights";
 import { Notice, OverviewAlerts, ProductsRecognition, ReviewCard, Simulation } from "./App";
 
 type Action = (path: string, body: unknown) => Promise<any>;
@@ -253,7 +252,7 @@ export function ReviewQueue({ data, token, action, reload }: { data: any; token:
   const shown = items.filter((i: any) => filter === "all" || (filter === "camera" ? !!i.s : !i.s));
   const index = Math.max(0, shown.findIndex((i: any) => i.h.id === selectedId));
   const current = shown[index];
-  const name = (id?: string) => (id ? data.products.find((p: any) => p.id === id)?.name || id : "");
+  const name = (id?: string) => (id && id !== "UNKNOWN" ? data.products.find((p: any) => p.id === id)?.name || id : "unknown item");
   async function dismissPicked() {
     const reason = prompt(`Dismiss ${picked.size} item(s): nothing to charge. Reason (kept in the audit log):`, "Test interactions, no real shopper");
     if (!reason || reason.trim().length < 3) return;
@@ -312,10 +311,17 @@ export function ReviewQueue({ data, token, action, reload }: { data: any; token:
                     e.target.checked ? next.add(i.h.id) : next.delete(i.h.id);
                     setPicked(next);
                   }} />
-                <button onClick={() => setSelectedId(i.h.id)}>
+                <button className="queuerow" onClick={() => setSelectedId(i.h.id)}>
+                  {i.h.thumb ? (
+                    <AuthImage path={`/staff/evidence-file/${encodeURIComponent(i.h.thumb)}`} token={token} alt="" className="queuethumb" />
+                  ) : (
+                    <span className="queuethumb nothumb">no video</span>
+                  )}
+                  <span>
                   <b>{act === "PICKUP" ? "Picked up" : act === "RETURN" ? "Put back" : "Unclear movement"}{product ? ` · ${name(product)}` : ""}</b>
                   <small>{when(i.s?.captured || i.h.captured)} · {i.h.tray_id}{i.s ? ` · camera ${i.s.confidence}` : ""}</small>
                   <small className="muted">{(i.h.reason || []).slice(0, 2).map(human).join(" · ")}</small>
+                  </span>
                 </button>
               </li>
             );
@@ -332,16 +338,157 @@ export function ReviewQueue({ data, token, action, reload }: { data: any; token:
                 <button className="textbutton" disabled={index >= shown.length - 1} onClick={() => setSelectedId(shown[index + 1].h.id)}>Next</button>
               </span>
             </div>
-            {current.s ? (
-              <SuggestionCard key={current.h.id} s={current.s} data={data} token={token} action={action} done={() => {}} />
-            ) : (
-              <ReviewCard key={current.h.id} h={current.h} data={data} token={token} action={action} />
-            )}
+            <QuickReview key={current.h.id} item={current} data={data} token={token} action={action}
+              onPrev={() => index > 0 && setSelectedId(shown[index - 1].h.id)}
+              onNext={() => index < shown.length - 1 && setSelectedId(shown[index + 1].h.id)}
+              onDone={async () => {
+                const next = shown[index + 1] || shown[index - 1];
+                setSelectedId(next ? next.h.id : "");
+                await reload();
+                call("/staff/preintegration/suggestions", token).then(setSuggestions).catch(() => {});
+              }} />
           </>
         ) : (
           <p className="muted">Choose an item.</p>
         )}
       </section>
+    </div>
+  );
+}
+
+/** One review item: the clip plays at once; product and shopper are one tap each; Enter records, D dismisses. */
+function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
+  item: { h: any; s?: any }; data: any; token: string; action: Action;
+  onDone: () => Promise<void>; onPrev: () => void; onNext: () => void;
+}) {
+  const { h, s } = item;
+  const [direction, setDirection] = useState<string>(s?.action || h.proposal?.action || "PICKUP");
+  const [product, setProduct] = useState<string>(s?.product_id || h.proposal?.product_id || "");
+  const [session, setSession] = useState<string>(s?.session_id || h.session_id || "");
+  const [note, setNote] = useState("");
+  const [more, setMore] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const key = useMemo(() => crypto.randomUUID(), [h.id]);
+  const active = data.sessions.filter((x: any) => x.status === "ACTIVE");
+  const guess = s?.product_id || h.proposal?.product_id;
+  const canRecord = !!s && !!product && !!session && !busy;
+  async function run(fn: () => Promise<any>) {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+      await onDone();
+    } catch (e) {
+      setError(String((e as Error).message || e));
+      setBusy(false);
+    }
+  }
+  const record = () =>
+    canRecord &&
+    run(() =>
+      call(`/staff/preintegration/from-evidence/${h.id}`, token, {
+        product_id: product,
+        session_id: session,
+        quantity_delta: (direction === "PICKUP" ? 1 : -1) * (s.quantity || 1),
+        physical_confirmed: true,
+        reason: note.trim() || "Checked the camera clip",
+        idempotency_key: key,
+      }),
+    );
+  const dismiss = () =>
+    !busy &&
+    run(() =>
+      call(`/staff/review/${h.id}`, token, {
+        decision: "DISMISS",
+        session_id: null,
+        quantity: 1,
+        reason: note.trim() || "No real product movement in the clip",
+      }),
+    );
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(tag) || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "Enter") record();
+      else if (e.key.toLowerCase() === "d") dismiss();
+      else if (e.key === "ArrowRight") onNext();
+      else if (e.key === "ArrowLeft") onPrev();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+  const name = (id: string) => data.products.find((p: any) => p.id === id)?.name || id;
+  const defaultNote = s ? "Checked the camera clip" : "No real product movement in the clip";
+  return (
+    <div className="quickreview">
+      <p className="quickwhen">
+        {when(s?.captured || h.captured)} · {h.tray_id}
+        {s ? ` · camera ${s.confidence}` : ""}
+      </p>
+      {h.frames > 0 || s ? <EvidencePlayer eventId={h.event_id} token={token} autoPlay /> : <p className="muted">No video stored for this item.</p>}
+      <ul className="why">
+        {(s?.why || (h.reason || []).map(human)).map((w: string) => (
+          <li key={w}>{w}</li>
+        ))}
+      </ul>
+      {s ? (
+        <>
+          <div className="pickrow">
+            <span>Movement</span>
+            <button className={direction === "PICKUP" ? "pick selected" : "pick"} onClick={() => setDirection("PICKUP")}>Picked up</button>
+            <button className={direction === "RETURN" ? "pick selected" : "pick"} onClick={() => setDirection("RETURN")}>Put back</button>
+          </div>
+          <div className="pickrow">
+            <span>Product</span>
+            <div className="productpicks">
+              {data.products.map((p: any) => (
+                <button key={p.id} className={product === p.id ? "productpick selected" : "productpick"} onClick={() => setProduct(p.id)}>
+                  <AuthImage path={`/staff/product-image/${encodeURIComponent(p.id)}`} token={token} alt="" className="pickimg" />
+                  <span>{p.name}</span>
+                  {p.id === guess && <small>camera guess</small>}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="pickrow">
+            <span>Shopper</span>
+            {active.length === 0 && (
+              <small className="muted">No shopper is checked in, so this can only be dismissed. Check shoppers in under Shoppers & checkout.</small>
+            )}
+            {active.map((x: any) => (
+              <button key={x.id} className={session === x.id ? "pick selected" : "pick"} onClick={() => setSession(x.id)}>
+                {x.customer_alias || "Shopper"} · {x.id.slice(0, 4)}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <Suggestion hypothesisId={h.id} token={token} onUse={() => setMore(true)} />
+      )}
+      <input className="quicknote" value={note} onChange={(e) => setNote(e.target.value)} placeholder={`Note (optional). Default: "${defaultNote}"`} />
+      <div className="quickbuttons">
+        {s && (
+          <button disabled={!canRecord} onClick={record}>
+            Record: {direction === "PICKUP" ? "picked up" : "put back"} {product ? name(product) : "…"} <kbd>Enter</kbd>
+          </button>
+        )}
+        <button className="danger" disabled={busy} onClick={dismiss}>
+          Not a real movement <kbd>D</kbd>
+        </button>
+        <button className="secondary" onClick={onNext}>
+          Skip <kbd>→</kbd>
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+      {!s && (
+        <details open={more} onToggle={(e) => setMore((e.target as HTMLDetailsElement).open)}>
+          <summary>More options (confirm into a cart, corrections)</summary>
+          {more && <ReviewCard h={h} data={data} token={token} action={action} />}
+        </details>
+      )}
     </div>
   );
 }
@@ -392,7 +539,10 @@ function Catalogue({ data, token, action, openTab }: { data: any; token: string;
           <tbody>
             {data.products.map((p: any) => (
               <tr key={p.id}>
-                <td>{p.name}<br /><small className="muted">{p.id}</small></td>
+                <td className="productcell">
+                  <AuthImage path={`/staff/product-image/${encodeURIComponent(p.id)}`} token={token} alt="" className="pickimg" />
+                  <span>{p.name}<br /><small className="muted">{p.id}</small></span>
+                </td>
                 <td>{money(p.price_minor)}</td>
                 <td>{stock(p.id)}</td>
                 <td>{trained === null ? <span className="muted">trainer off</span> : trained.includes(p.id) ? "✓ trained" : <span className="lowstock">not trained</span>}</td>

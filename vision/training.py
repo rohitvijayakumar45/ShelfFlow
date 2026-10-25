@@ -177,7 +177,7 @@ def resolve_device(device="auto"):
         return "cpu"
 
 
-def label_session(session, prompt, quality="fast", device="auto", progress=lambda done, total: None, cancelled=lambda: False):
+def label_session(session, prompt, quality="fast", device="auto", progress=lambda done, total: None, cancelled=lambda: False, imgsz=640):
     """Track the marked product through the clip with SAM 2.1, forwards and backwards from the marked frame.
 
     prompt: {"frame": i, "point": [x, y]} or {"frame": i, "box": [x1, y1, x2, y2]} in image pixels.
@@ -203,7 +203,7 @@ def label_session(session, prompt, quality="fast", device="auto", progress=lambd
         for number, order in enumerate(passes):
             clip = work / f"pass{number}.avi"
             _write_clip(session, order, clip)
-            predictor = SAM2VideoPredictor(overrides=dict(model=str(weights), task="segment", mode="predict", imgsz=1024,
+            predictor = SAM2VideoPredictor(overrides=dict(model=str(weights), task="segment", mode="predict", imgsz=imgsz,
                                                           conf=0.25, device=device, save=False, verbose=False))
             for k, result in enumerate(predictor(source=str(clip), stream=True, **kwargs)):
                 index = order[k]

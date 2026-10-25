@@ -15,19 +15,21 @@ from vision.identify import Dinov2Embedder, Gallery
 
 
 class DetectorPreview(camera_preview.SharedCamera):
-    def __init__(self, source, weights, gallery, device, backend=None, device_key=None):
+    def __init__(self, source, weights, gallery, device, backend=None, device_key=None, products_model=False):
         super().__init__(source, '')
         self.source = camera_preview.SharedCamera(source, '')
         self.model = YOLO(weights)
-        self.gallery = Gallery.load(gallery)
-        self.embedder = Dinov2Embedder(device, self.gallery.embedder_name)
+        # products_model: a YOLO26n model from the Train products page names products itself (class = product ID).
+        self.products_model = products_model
+        self.gallery = None if products_model else Gallery.load(gallery)
+        self.embedder = None if products_model else Dinov2Embedder(device, self.gallery.embedder_name)
         self.device = device
         self.predictions = []
         self.processing_ms = None
         # Same live references as the vision service (teach, restock, staff labels), so a
         # newly taught product is named here too instead of showing as Unknown.
         self.sync, self.synced = None, 0.0
-        if backend and device_key:
+        if backend and device_key and not products_model:
             import httpx
             from vision.references import ReferenceSync
             api = httpx.Client(base_url=backend, headers={'X-Device-Key': device_key}, timeout=5, trust_env=False)
@@ -79,18 +81,24 @@ class DetectorPreview(camera_preview.SharedCamera):
                     boxes.append((x1,y1,x2,y2))
                     crops.append(frame[y1:y2,x1:x2])
             predictions = []
-            if crops:
+            if crops and self.products_model:
+                labelled = [(b, detected.names[int(d.cls.item())], float(d.conf.item())) for b, d in zip(boxes, detected.boxes)]
+            elif crops:
+                labelled = []
                 for box, vector in zip(boxes, self.embedder.embed(crops)):
                     match = self.gallery.identify(vector, .68, .06)
+                    labelled.append((box, match.product_id if match.known else None, None))
+            if crops:
+                for box, product, score in labelled:
                     x1,y1,x2,y2 = box
-                    color = (40,210,40) if match.known else (0,175,255)
-                    label = match.product_id.title() if match.known else 'Unknown'
+                    color = (40,210,40) if product else (0,175,255)
+                    label = (product.replace('-', ' ').title() if product else 'Unknown') + (f' {score:.2f}' if score is not None else '')
                     cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
                     (tw,th),base = cv2.getTextSize(label,cv2.FONT_HERSHEY_SIMPLEX,.6,2)
                     ty = max(th+7,y1)
                     cv2.rectangle(frame,(x1,ty-th-7),(min(w-1,x1+tw+8),ty+base),color,-1)
                     cv2.putText(frame,label,(x1+4,ty-3),cv2.FONT_HERSHEY_SIMPLEX,.6,(0,0,0),2,cv2.LINE_AA)
-                    predictions.append({'product':match.product_id,'box':box})
+                    predictions.append({'product':product or 'UNKNOWN','box':box,**({'score':round(score,3)} if score is not None else {})})
             ok, encoded = cv2.imencode('.jpg',frame,[cv2.IMWRITE_JPEG_QUALITY,85])
             if ok and time.monotonic()-received < 2:
                 with self.condition:
@@ -106,7 +114,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',default='http://127.0.0.1:8765/stream')
     parser.add_argument('--port',type=int,default=8766)
-    parser.add_argument('--weights',default='models/shelf-pilot-item-detector.pt')
+    parser.add_argument('--weights',help='default: the model switched on in Train products, else the pilot item detector')
     parser.add_argument('--gallery',default='models/shelf-pilot-gallery.npz')
     parser.add_argument('--device',default='cuda:0')
     parser.add_argument('--backend',default='http://127.0.0.1:8000')
@@ -114,7 +122,12 @@ def main():
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).resolve().parents[1] / 'data/integration/runtime.env')
     camera_preview.PAGE = camera_preview.PAGE.replace(b'OV3660 live feed',b'Live product detection').replace(b'<p id="status">',b'<p>Pilot recognition: uncertain items may be misidentified. No cart actions.</p><p id="status">')
-    preview = DetectorPreview(args.source,args.weights,args.gallery,args.device,args.backend,os.getenv('DEVICE_SECRET'))
+    root = Path(__file__).resolve().parents[1]
+    trained = root / 'models/trained/active.pt'
+    products_model = not args.weights and trained.is_file() and os.getenv('SHELFFLOW_DETECTOR', 'trained') != 'gallery'
+    weights = args.weights or (str(trained) if products_model else 'models/shelf-pilot-item-detector.pt')
+    print('Detector:', 'trained YOLO26n product model' if products_model else 'item detector + DINOv2 gallery', weights, flush=True)
+    preview = DetectorPreview(args.source,weights,args.gallery,args.device,args.backend,os.getenv('DEVICE_SECRET'),products_model)
     server = camera_preview.make_server(preview,args.port)
     preview.start()
     print(f'Live detector: http://127.0.0.1:{args.port}',flush=True)

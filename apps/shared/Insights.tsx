@@ -291,12 +291,13 @@ export function ShelfMap({ tray, units, products }: { tray: any; units: any[]; p
 }
 
 /** Frames with the boxes vision saw, the tray weight and bracelet taps on one timeline. */
-export function EvidencePlayer({ eventId, token }: { eventId: string; token: string }) {
+export function EvidencePlayer({ eventId, token, autoPlay }: { eventId: string; token: string; autoPlay?: boolean }) {
   const [timeline, setTimeline] = useState<any>(null),
     [images, setImages] = useState<string[]>([]),
     [index, setIndex] = useState(0),
     [size, setSize] = useState<[number, number]>([0, 0]),
-    [playing, setPlaying] = useState(false),
+    [playing, setPlaying] = useState(!!autoPlay),
+    [ready, setReady] = useState(false),
     [error, setError] = useState("");
   useEffect(() => {
     let stopped = false;
@@ -306,11 +307,27 @@ export function EvidencePlayer({ eventId, token }: { eventId: string; token: str
         const t = await call(`/staff/evidence/${eventId}/timeline`, token);
         if (stopped) return;
         setTimeline(t);
-        for (const f of t.frames.slice(0, 80)) {
-          const r = await fetch(`${API}/staff/evidence-file/${encodeURIComponent(f.ref)}`, { headers: { Authorization: `Bearer ${token}` } });
-          urls.push(r.ok ? URL.createObjectURL(await r.blob()) : "");
+        // Middle frame first (shown at once), then the rest 8 at a time.
+        const frames = t.frames.slice(0, 80);
+        const order = [Math.floor(frames.length / 2), ...frames.map((_: any, i: number) => i)];
+        const fetched = new Array(frames.length).fill("");
+        const load = async (i: number) => {
+          if (fetched[i]) return;
+          const r = await fetch(`${API}/staff/evidence-file/${encodeURIComponent(frames[i].ref)}`, { headers: { Authorization: `Bearer ${token}` } });
+          fetched[i] = r.ok ? URL.createObjectURL(await r.blob()) : "";
+          if (fetched[i]) urls.push(fetched[i]);
+        };
+        if (frames.length) {
+          await load(order[0]);
+          if (stopped) return;
+          setImages([...fetched]);
+          setIndex(order[0]);
         }
-        if (!stopped) setImages([...urls]);
+        for (let k = 1; k < order.length && !stopped; k += 8) {
+          await Promise.all(order.slice(k, k + 8).map(load));
+          if (!stopped) setImages([...fetched]);
+        }
+        if (!stopped) setReady(true);
       } catch (e) {
         if (!stopped) setError(String(e));
       }
@@ -321,10 +338,10 @@ export function EvidencePlayer({ eventId, token }: { eventId: string; token: str
     };
   }, [eventId, token]);
   useEffect(() => {
-    if (!playing || !images.length) return;
+    if (!playing || !ready || !images.length) return; // play once every frame is in
     const t = setInterval(() => setIndex((i) => (i + 1) % images.length), 125);
     return () => clearInterval(t);
-  }, [playing, images.length]);
+  }, [playing, ready, images.length]);
   if (error) return <p className="error">{error}</p>;
   if (!timeline) return <p className="muted">Loading evidence…</p>;
   const frame = timeline.frames[index];

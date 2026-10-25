@@ -220,8 +220,11 @@ def state(user=Depends(staff)):
                                'reader':next((r[12:] for r in e.payload['evidence_refs'] if r.startswith('RFID_READER:')),None)} for e in recent]
         # Capture time per review item, so the staff review queue can sort and show when it happened.
         events={e.id:e.payload.get('capture_end') for e in db.scalars(select(SensorEvent).where(SensorEvent.id.in_([h['event_id'] for h in result['hypotheses']])))}
+        clips={e.event_id:[r for r in e.references if str(r).endswith('.jpg')] for e in db.scalars(select(Evidence).where(Evidence.event_id.in_(list(events))))}
         for h in result['hypotheses']:
             h['captured']=events.get(h['event_id'])
+            frames=clips.get(h['event_id'],[])
+            h['frames'],h['thumb']=len(frames),(frames[len(frames)//2] if frames else None)  # middle frame: the item is usually in hand
         result['assisted_stock'] = [serialize(o) for o in db.scalars(select(AssistedStock))]
         result['assisted_actions'] = [serialize(o) for o in db.scalars(select(AssistedAction).order_by(AssistedAction.created.desc()).limit(50))]
         return {**result, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED}
@@ -1049,9 +1052,17 @@ def evidence_timeline(event_id: str, user=Depends(staff)):
             raise HTTPException(404, "Event not found")
         return result
 
+@app.get("/staff/product-image/{product_id}")
+def staff_product_image(product_id: str, user=Depends(staff)):
+    """Same thumbnail for the staff catalogue and the review queue's product buttons."""
+    return product_image_file(product_id)
+
 @app.get("/customer/product-image/{product_id}")
 def product_image(product_id: str, user=Depends(customer)):
     """Thumbnail for cart lines and receipts: the clearest learned reference of the product."""
+    return product_image_file(product_id)
+
+def product_image_file(product_id: str):
     with SessionLocal() as db:
         name = refs.best_image(db, product_id)
     if not name:
