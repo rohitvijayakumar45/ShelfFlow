@@ -218,6 +218,10 @@ def state(user=Depends(staff)):
         result['recent_taps']=[{'event_id':e.id,'captured':e.payload['capture_end'],
                                'uid':next((r[5:] for r in e.payload['evidence_refs'] if r.startswith('RFID:')),None),
                                'reader':next((r[12:] for r in e.payload['evidence_refs'] if r.startswith('RFID_READER:')),None)} for e in recent]
+        # Capture time per review item, so the staff review queue can sort and show when it happened.
+        events={e.id:e.payload.get('capture_end') for e in db.scalars(select(SensorEvent).where(SensorEvent.id.in_([h['event_id'] for h in result['hypotheses']])))}
+        for h in result['hypotheses']:
+            h['captured']=events.get(h['event_id'])
         result['assisted_stock'] = [serialize(o) for o in db.scalars(select(AssistedStock))]
         result['assisted_actions'] = [serialize(o) for o in db.scalars(select(AssistedAction).order_by(AssistedAction.created.desc()).limit(50))]
         return {**result, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED}
@@ -469,6 +473,33 @@ def raw_camera_jpeg():
         return response.content
     except (httpx.HTTPError, ValueError):
         raise HTTPException(503, 'No fresh original camera frame. Check camera power and hotspot; no capture was saved.')
+
+
+@app.get('/staff/camera/stream')
+async def camera_stream(view: Literal['detections', 'raw'] = 'detections', user=Depends(staff)):
+    """Live MJPEG for the staff app: the detector preview (boxes drawn) or the original camera proxy."""
+    import httpx
+    from fastapi.responses import StreamingResponse
+    base = os.getenv('RAW_CAMERA_URL', 'http://127.0.0.1:8765') if view == 'raw' else os.getenv('CAMERA_URL', 'http://127.0.0.1:8766')
+    client = httpx.AsyncClient(timeout=httpx.Timeout(5, read=15), trust_env=False)
+    try:
+        upstream = await client.send(client.build_request('GET', base.rstrip('/') + '/stream'), stream=True)
+        upstream.raise_for_status()
+    except httpx.HTTPError:
+        await client.aclose()
+        raise HTTPException(503, 'Camera stream unavailable: check camera power, the hotspot and the camera preview services.')
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        except httpx.HTTPError:
+            pass
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+    return StreamingResponse(body(), media_type=upstream.headers.get('content-type', 'multipart/x-mixed-replace;boundary=sfframe'),
+                             headers={'Cache-Control': 'no-store'})
 
 
 @app.get('/staff/camera/raw-preview')

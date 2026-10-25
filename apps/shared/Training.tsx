@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MjpegView } from "./Live";
 import { CheckCircle, Crosshair, Play, Record, Stop, Trash, WarningCircle } from "@phosphor-icons/react";
 
 // Train products: record a clip -> mark the product once (SAM 2.1 boxes every frame)
@@ -38,95 +39,6 @@ const FLAG_TEXT: Record<string, string> = {
   skipped: "not labelled",
 };
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-
-/** Live MJPEG through fetch (keeps the staff token out of URLs); draws only the newest frame. */
-function MjpegView({ path, token, children }: { path: string; token: string; children?: React.ReactNode }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const [live, setLive] = useState(false);
-  useEffect(() => {
-    const ctrl = new AbortController();
-    let stopped = false,
-      retry: any,
-      isLive = false;
-    const mark = (v: boolean) => {
-      if (v !== isLive) setLive((isLive = v));
-    };
-    async function run() {
-      try {
-        const r = await fetch(T + path, { headers: { Authorization: `Bearer ${token}` }, signal: ctrl.signal, cache: "no-store" });
-        if (!r.ok || !r.body) throw new Error(String(r.status));
-        const reader = r.body.getReader();
-        let buf = new Uint8Array(0),
-          drawing = false;
-        const decoder = new TextDecoder();
-        while (!stopped) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const next = new Uint8Array(buf.length + value.length);
-          next.set(buf);
-          next.set(value, buf.length);
-          buf = next;
-          let latest: Uint8Array | null = null;
-          for (;;) {
-            let h = -1;
-            for (let i = 0; i + 3 < buf.length; i++)
-              if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) {
-                h = i;
-                break;
-              }
-            if (h < 0) break;
-            const m = /content-length:\s*(\d+)/i.exec(decoder.decode(buf.subarray(0, h)));
-            if (!m) {
-              buf = buf.slice(h + 4);
-              continue;
-            }
-            const end = h + 4 + Number(m[1]);
-            if (buf.length < end) break;
-            latest = buf.slice(h + 4, end);
-            buf = buf.slice(end);
-          }
-          if (latest && !drawing) {
-            drawing = true;
-            createImageBitmap(new Blob([latest as BlobPart], { type: "image/jpeg" }))
-              .then((bmp) => {
-                const c = canvas.current;
-                if (c) {
-                  if (c.width !== bmp.width || c.height !== bmp.height) {
-                    c.width = bmp.width;
-                    c.height = bmp.height;
-                  }
-                  c.getContext("2d")!.drawImage(bmp, 0, 0);
-                  mark(true);
-                }
-                bmp.close();
-              })
-              .catch(() => {})
-              .finally(() => (drawing = false));
-          }
-        }
-        throw new Error("ended");
-      } catch {
-        if (!stopped) {
-          mark(false);
-          retry = setTimeout(run, 1500);
-        }
-      }
-    }
-    run();
-    return () => {
-      stopped = true;
-      ctrl.abort();
-      clearTimeout(retry);
-    };
-  }, [path, token]);
-  return (
-    <div className="livebox">
-      <canvas ref={canvas} width={640} height={480} aria-label="Live camera" />
-      {!live && <div className="liveempty">Waiting for camera frames…</div>}
-      {children}
-    </div>
-  );
-}
 
 /** Image behind staff auth, fetched only when scrolled into view. */
 function AuthedImg({ src, token, alt, className }: { src: string; token: string; alt: string; className?: string }) {
@@ -169,13 +81,13 @@ function Bar({ value, label }: { value: number; label?: string }) {
   );
 }
 
-export function TrainProducts({ data, token }: { data: any; token: string }) {
+export function TrainProducts({ data, token, initialProduct }: { data: any; token: string; initialProduct?: string }) {
   const [status, setStatus] = useState<any>(null),
     [sessions, setSessions] = useState<any[]>([]),
     [runs, setRuns] = useState<any[]>([]),
     [error, setError] = useState(""),
     [offline, setOffline] = useState(""),
-    [product, setProduct] = useState(data.products[0]?.id || ""),
+    [product, setProduct] = useState(initialProduct || data.products[0]?.id || ""),
     [open, setOpen] = useState<{ id: string; mode: "mark" | "review" } | null>(null),
     [epochs, setEpochs] = useState(50),
     [busy, setBusy] = useState(false);
@@ -259,7 +171,7 @@ export function TrainProducts({ data, token }: { data: any; token: string }) {
   return (
     <>
       <section className="panel">
-        <h2>Teach the camera a product</h2>
+        <h2>How it works</h2>
         <ol className="steps trainsteps">
           <li><b>Record</b> a short clip while you turn the product slowly in front of the camera.</li>
           <li><b>Mark</b> the product once — one click (or a box) on any frame. SAM 2.1 then finds it in every frame.</li>
@@ -292,7 +204,7 @@ export function TrainProducts({ data, token }: { data: any; token: string }) {
         </div>
         <div className="recordgrid">
           <div>
-            <MjpegView path="/stream" token={token}>
+            <MjpegView url={T + "/stream"} token={token}>
               {rec && (
                 <div className="recbadge">
                   <span className="recdot" /> REC {clock(rec.seconds)} · {rec.frames} frames · {rec.sharp} sharp
@@ -546,7 +458,7 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
       </table>
       {test && (
         <div className="recordgrid">
-          <MjpegView path="/test/stream" token={token} />
+          <MjpegView url={T + "/test/stream"} token={token} />
           <div>
             <h3>Live test</h3>
             <p className="muted">Hold each product in front of the camera. Nothing here affects carts.</p>

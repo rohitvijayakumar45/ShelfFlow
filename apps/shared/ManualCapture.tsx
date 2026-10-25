@@ -9,8 +9,8 @@ type Draft = {
   crop_file: string | null; created: number; details: any; reference_ids: string[];
 };
 
-export function ManualCapture({ token, products, tray }: { token: string; products: any[]; tray: string }) {
-  const [show, setShow] = useState(false), [product, setProduct] = useState(products[0]?.id || "");
+export function ManualCapture({ token, products, tray, startOpen }: { token: string; products: any[]; tray: string; startOpen?: boolean }) {
+  const [show, setShow] = useState(!!startOpen), [product, setProduct] = useState(products[0]?.id || "");
   const [drafts, setDrafts] = useState<Draft[]>([]), [selected, setSelected] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null), [live, setLive] = useState("");
   const [original, setOriginal] = useState(""), [box, setBox] = useState<Box | null>(null);

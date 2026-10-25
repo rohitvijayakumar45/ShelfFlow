@@ -18,11 +18,12 @@ import {
   Sparkle,
   ChartLine,
   GraduationCap,
+  VideoCamera,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
 import { Preintegration } from "./Preintegration";
 import { ManualCapture } from "./ManualCapture";
-import { TrainProducts } from "./Training";
+import { Go, Home, LiveCamera, ProductsHub, ReviewQueue, StatusChips, Tabs, pendingOf, useCameraStatus } from "./StaffHub";
 import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
 
 function Brand() {
@@ -35,7 +36,7 @@ function Brand() {
     </a>
   );
 }
-function Notice({ children }: { children: ReactNode }) {
+export function Notice({ children }: { children: ReactNode }) {
   return (
     <div className="notice">
       <WarningCircle size={20} />
@@ -607,25 +608,43 @@ function Dispute({
 }
 
 const nav = [
-  ["Overview", Storefront],
-  ["Assisted workflow", CheckCircle],
-  ["Gate & bracelets", QrCode],
-  ["Shelf setup", Tray],
-  ["Tray loading", Scales],
-  ["Products & recognition", Sparkle],
-  ["Train products", GraduationCap],
-  ["Evidence review", Camera],
-  ["Insights", ChartLine],
-  ["Sessions & receipts", Users],
+  ["Daily", [["Home", Storefront], ["Live camera", VideoCamera], ["Review queue", Camera], ["Shoppers & checkout", Users], ["Stock", Scales]]],
+  ["Products", [["Products & training", GraduationCap]]],
+  ["Advanced", [["Insights", ChartLine], ["Shelf setup", Tray]]],
 ] as const;
+const intro: Record<string, string> = {
+  Home: "Everything at a glance. Click a tile to go where it needs you.",
+  "Live camera": "Watch the shelf live, with or without the recognition boxes.",
+  "Review queue": "Things the shelf could not settle on its own. Pick one on the left, decide on the right.",
+  "Shoppers & checkout": "Check shoppers in with a bracelet, follow their visit, and check them out.",
+  Stock: "How many of each product are on the shelf.",
+  "Products & training": "Add products and teach the camera to recognise them.",
+  Insights: "How well the shelf is doing over time.",
+  "Shelf setup": "Tray regions, calibration and catalogue details. Rarely needed.",
+};
 export function Staff() {
-  const [token, setToken] = useState(
-      sessionStorage.getItem("staff-token") || "",
-    ),
-    [page, setPage] = useState("Overview"),
+  const [token, setToken] = useState(sessionStorage.getItem("staff-token") || ""),
+    [route, setRoute] = useState<{ page: string; tab?: string; product?: string }>(() => {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem("staff-route") || "null");
+        return saved && intro[saved.page] ? saved : { page: "Home" };
+      } catch {
+        return { page: "Home" };
+      }
+    }),
     [data, setData] = useState<any>(null),
     [error, setError] = useState(""),
     [connectionError, setConnectionError] = useState("");
+  const page = route.page;
+  const go: Go = (next, tab, product) => {
+    const value = { page: next, tab: tab || (next === "Products & training" ? "catalogue" : undefined), product };
+    setRoute(value);
+    setError("");
+    try {
+      sessionStorage.setItem("staff-route", JSON.stringify(value));
+    } catch {}
+    window.scrollTo({ top: 0 });
+  };
   const reload = async () => {
     try {
       setData(await call("/staff/state", token));
@@ -646,6 +665,7 @@ export function Staff() {
       return () => clearInterval(t);
     }
   }, [token]);
+  const camera = useCameraStatus(token);
   const action = async (path: string, body: unknown) => {
     setError("");
     try {
@@ -658,17 +678,13 @@ export function Staff() {
     }
   };
   if (!token) return <Login staff onLogin={setToken} />;
-  const pending =
-    data?.hypotheses.filter((h: any) =>
-      ["PENDING_REVIEW", "DISPUTED"].includes(h.status),
-    ) || [];
+  const pending = pendingOf(data);
   return (
     <>
       <header>
         <Brand />
-        <span className="tag">
-          Store operations · {data?.mode || "connecting"}
-        </span>
+        {data && <StatusChips data={data} camera={camera} go={go} />}
+        <span className="tag">{data?.mode === "simulation" ? "Simulation" : "Live shelf"}</span>
         <button
           className="iconbutton"
           aria-label="Sign out"
@@ -682,37 +698,22 @@ export function Staff() {
       </header>
       <div className="stafflayout">
         <nav>
-          {nav.map(([name, Icon]) => (
-            <button
-              key={name}
-              className={page === name ? "active" : ""}
-              onClick={() => setPage(name)}
-            >
-              <Icon size={21} />
-              {name}
-              {name === "Evidence review" && pending.length > 0 && (
-                <span className="count">{pending.length}</span>
-              )}
-            </button>
+          {nav.map(([group, items]) => (
+            <div className="navgroup" key={group}>
+              <p>{group}</p>
+              {items.map(([name, Icon]) => (
+                <button key={name} className={page === name ? "active" : ""} onClick={() => go(name)}>
+                  <Icon size={21} />
+                  {name}
+                  {name === "Review queue" && pending.length > 0 && <span className="count">{pending.length}</span>}
+                </button>
+              ))}
+            </div>
           ))}
-          <div className="navnote">
-            ONE CAMERA
-            <br />
-            {data?.weights_enabled === false ? "Staff-confirmed item movements" : "Weight and camera evidence"}
-            <br />
-            <b>Physical validation pending</b>
-          </div>
         </nav>
         <main>
-          <p className="eyebrow">SHELF 01 / DEMONSTRATION STORE</p>
-          <h1>
-            {page === "Overview" ? "Every interaction, accounted for." : page}
-          </h1>
-          <p className="lede">
-            {page === "Overview"
-              ? "A live view of your shelf, shoppers, and evidence."
-              : "Changes are recorded in the store audit trail."}
-          </p>
+          <h1>{page}</h1>
+          <p className="lede">{intro[page]}</p>
           {(error || connectionError) && (
             <p role="alert" className="error">
               {error || connectionError}
@@ -722,127 +723,35 @@ export function Staff() {
             <p>Connecting to store…</p>
           ) : (
             <>
-              {data.weights_enabled === false && <Notice>Weight integration is unavailable. Use Assisted workflow to count stock and confirm item movements. Automatic weight-based cart changes are blocked.</Notice>}
-              {page === "Assisted workflow" && <Preintegration data={data} token={token} action={action} />}
-              {page === "Overview" && (
-                <>
-                  <div className="metrics">
-                    <div>
-                      <span>Active visits</span>
-                      <strong>
-                        {
-                          data.sessions.filter(
-                            (s: any) => s.status === "ACTIVE",
-                          ).length
-                        }
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Awaiting review</span>
-                      <strong>{pending.length}</strong>
-                    </div>
-                    <div>
-                      <span>Available bracelets</span>
-                      <strong>
-                        {
-                          data.bracelets.filter(
-                            (b: any) => b.state === "AVAILABLE",
-                          ).length
-                        }
-                      </strong>
-                    </div>
-                    <div>
-                      <span>Tray stock</span>
-                      <strong>
-                        {data.trays.reduce(
-                          (n: number, t: any) => n + t.stock,
-                          0,
-                        )}
-                      </strong>
-                    </div>
-                  </div>
-                  <OverviewAlerts data={data} pending={pending} token={token} />
-                  <div className="overviewgrid">
-                    <section className="panel">
-                      <div className="sectionhead">
-                        <h2>Shelf status</h2>
-                        <span className="tag">
-                          {data.mode === "simulation"
-                            ? "SIMULATION"
-                            : "REVIEW FIRST"}
-                        </span>
-                      </div>
-                      {data.trays.map((t: any) => (
-                        <div className="shelftray" key={t.id}>
-                          <Tray size={30} />
-                          <div>
-                            <h3>{t.id}</h3>
-                            <p>
-                              {t.unit_tracking
-                                ? "Mixed products · tracked per item"
-                                : data.products.find(
-                                    (p: any) => p.id === t.product_id,
-                                  )?.name}
-                            </p>
-                          </div>
-                          <b>
-                            {t.stock}
-                            <small>in stock</small>
-                          </b>
-                        </div>
-                      ))}
-                      {data.trays.filter((t: any) => t.unit_tracking).map((t: any) => (
-                        <ShelfMap key={t.id} tray={t} units={data.tray_units} products={data.products} />
-                      ))}
-                    </section>
-                    <section className="panel">
-                      <h2>Device health</h2>
-                      {data.devices.map((d: any) => (
-                        <div className="row" key={d.id}>
-                          <span>{d.id}</span>
-                          <span
-                            className={
-                              Date.now() / 1000 - d.last_seen < 30
-                                ? "live"
-                                : "offline"
-                            }
-                          >
-                            {d.health.ok === false
-                              ? "Sensor fault"
-                              : Date.now() / 1000 - d.last_seen < 30
-                                ? "Recently seen"
-                                : "No recent heartbeat"}
-                          </span>
-                        </div>
-                      ))}
-                      <p className="muted">
-                        A recent message does not prove physical sensor
-                        accuracy.
-                      </p>
-                    </section>
-                  </div>
-                  <section className="panel">
-                    <h2>Recent RFID taps</h2>
-                    {!data.recent_taps?.length && <p className="muted">Tap a registered tag at either reader.</p>}
-                    {data.recent_taps?.slice(0,8).map((tap:any)=>(
-                      <div className="row" key={tap.event_id}>
-                        <span>{tap.reader || "Reader"} · {tap.uid}</span>
-                        <span>{Date.now()/1000-tap.captured<60 ? "Just received" : "Earlier capture"}</span>
-                      </div>
-                    ))}
-                  </section>
-                  {data.mode === "simulation" && <section className="panel">
-                    <h2>Simulation bench</h2>
-                    <p>
-                      These controls generate labelled evidence through device
-                      ingestion and fusion. They are staff demo controls.
-                    </p>
-                    <Simulation data={data} action={action} />
-                  </section>}
-                </>
+              {page === "Home" && <Home data={data} token={token} action={action} camera={camera} go={go} />}
+              {page === "Live camera" && <LiveCamera data={data} token={token} go={go} />}
+              {page === "Review queue" && <ReviewQueue data={data} token={token} action={action} reload={reload} />}
+              {page === "Shoppers & checkout" && <ShoppersPage data={data} token={token} action={action} />}
+              {page === "Stock" &&
+                (data.weights_enabled === false ? (
+                  <Preintegration data={data} token={token} action={action} stockOnly />
+                ) : (
+                  <TrayLoading data={data} action={action} token={token} />
+                ))}
+              {page === "Products & training" && (
+                <ProductsHub data={data} token={token} action={action} tab={route.tab || "catalogue"} product={route.product} go={go} />
               )}
-              {page === "Gate & bracelets" && (
-                <>
+              {page === "Insights" && <Insights data={data} action={action} token={token} />}
+              {page === "Shelf setup" && <Setup data={data} action={action} token={token} />}
+            </>
+          )}
+        </main>
+      </div>
+    </>
+  );
+}
+function ShoppersPage({ data, token, action }: { data: any; token: string; action: Action }) {
+  const [tab, setTab] = useState("entry");
+  return (
+    <>
+      <Tabs tabs={[["entry", "Check-in & bracelets"], ["visits", "Visits & checkout"], ["accounts", "Accounts & receipts"]]} value={tab} onChange={setTab} />
+      {tab === "entry" && (
+        <>
                   <Gate token={token} data={data} action={action} />
                   <section className="panel">
                     <h2>Bracelet inventory</h2>
@@ -907,66 +816,22 @@ export function Staff() {
                       </tbody>
                     </table>
                   </section>
-                </>
-              )}
-              {page === "Shelf setup" && (
-                <Setup data={data} action={action} token={token} />
-              )}
-              {page === "Tray loading" && (
-                data.weights_enabled === false ? <Notice>Weight-based loading is unavailable. Use Assisted workflow to record physically counted stock.</Notice> : <TrayLoading data={data} action={action} token={token} />
-              )}
-              {page === "Products & recognition" && (
-                <>
-                  <HelpTheCamera data={data} token={token} />
-                  <ProductsRecognition data={data} action={action} token={token} />
-                </>
-              )}
-              {page === "Train products" && <TrainProducts data={data} token={token} />}
-              {page === "Insights" && <Insights data={data} action={action} token={token} />}
-              {page === "Evidence review" && (
-                <section className="panel">
-                  <h2>Pending evidence</h2>
-                  {pending.length === 0 ? (
-                    <div className="empty">
-                      <CheckCircle size={36} />
-                      <h3>Nothing awaiting review.</h3>
-                      <p>Ambiguous interactions will appear here.</p>
-                    </div>
-                  ) : (
-                    pending.map((h: any) => (
-                      <ReviewCard
-                        key={h.id}
-                        h={h}
-                        data={data}
-                        token={token}
-                        action={action}
-                      />
-                    ))
-                  )}
-                </section>
-              )}
-              {page === "Sessions & receipts" && (
-                <>
-                  <section className="panel">
-                    <h2>Customer accounts</h2>
-                    <p>
-                      Staff can provision a local account for hardware
-                      demonstrations. Alias-only entry remains limited to
-                      simulation.
-                    </p>
-                    <JsonForm
-                      label="Customer account"
-                      initial={{
-                        username: "",
-                        alias: "",
-                        password: "",
-                        reason: "",
-                      }}
-                      onSubmit={(body) =>
-                        action("/staff/customer-accounts", body)
-                      }
-                    />
-                  </section>
+        </>
+      )}
+      {tab === "visits" && (
+        <>
+          <section className="panel">
+            <h2>Visits</h2>
+            {data.sessions.length === 0 && <p className="muted">No visits yet.</p>}
+            {data.sessions.map((s: any) => (
+              <div className="row" key={s.id}>
+                <b>{s.customer_alias || "Shopper"}</b>
+                <code>{s.id.slice(0, 8)}</code>
+                <span>{s.status.toLowerCase()}</span>
+                <span className="muted">cart v{s.cart_version}</span>
+              </div>
+            ))}
+          </section>
                   <section className="panel">
                     <h2>Assisted exit reconciliation</h2>
                     <JsonForm
@@ -1017,15 +882,30 @@ export function Staff() {
                       />
                     </details>
                   </section>
+
+        </>
+      )}
+      {tab === "accounts" && (
+        <>
                   <section className="panel">
-                    <h2>Visits</h2>
-                    {data.sessions.map((s: any) => (
-                      <div className="row" key={s.id}>
-                        <code>{s.id.slice(0, 8)}</code>
-                        <span>{s.status}</span>
-                        <span>cart v{s.cart_version}</span>
-                      </div>
-                    ))}
+                    <h2>Customer accounts</h2>
+                    <p>
+                      Staff can provision a local account for hardware
+                      demonstrations. Alias-only entry remains limited to
+                      simulation.
+                    </p>
+                    <JsonForm
+                      label="Customer account"
+                      initial={{
+                        username: "",
+                        alias: "",
+                        password: "",
+                        reason: "",
+                      }}
+                      onSubmit={(body) =>
+                        action("/staff/customer-accounts", body)
+                      }
+                    />
                   </section>
                   <section className="panel">
                     <h2>Digital receipts</h2>
@@ -1042,18 +922,8 @@ export function Staff() {
                       ))
                     )}
                   </section>
-                </>
-              )}
-            </>
-          )}
-        </main>
-      </div>
-      <footer>
-        ShelfFlow prototype
-        <span>
-          Ownership stays with original picker. Transfers require staff.
-        </span>
-      </footer>
+        </>
+      )}
     </>
   );
 }
@@ -1261,7 +1131,7 @@ function VerifiedAssignment({data,action}:{data:any;action:Action}){
       onClick={()=>action('/staff/manual-assignment',{session_id:sid,bracelet_id:bid,actual_uid:uid,physical_confirmed:confirmed,reason}).then(()=>{setSid("");setConfirmed(false);setReason("");}).catch(()=>{})}>Assign tag and start visit</button>
   </div>;
 }
-function Simulation({ data, action }: { data: any; action: Action }) {
+export function Simulation({ data, action }: { data: any; action: Action }) {
   const [sid, setSid] = useState(""),
     [tray, setTray] = useState("tray-a");
   return (
@@ -1447,7 +1317,6 @@ function Setup({
 }) {
   return (
     <>
-      <CameraPreview token={token} />
       <Notice>
         Seed unit weights are simulated. Measure actual samples and enter a
         distribution tolerance before hardware testing. Calibration never runs
@@ -1529,7 +1398,7 @@ function Setup({
     </>
   );
 }
-function ReviewCard({
+export function ReviewCard({
   h,
   data,
   token,
@@ -2088,20 +1957,24 @@ function lookStatus(status: string | null) {
   return "✗ " + status.replace("FAILED:", "").replaceAll("_", " ").toLowerCase();
 }
 // Manual snapshots are independent of the automatic teach collector.
-function TeachCamera({ token, products, tray }: {
-  token: string; products: any[]; refs: any[]; sessions: any[]; tray: string; busy: boolean;
+function TeachCamera({ token, products, tray, startOpen }: {
+  startOpen?: boolean; token: string; products: any[]; refs: any[]; sessions: any[]; tray: string; busy: boolean;
   run: (fn: () => Promise<any>) => Promise<void>; action: Action;
 }) {
-  return <ManualCapture token={token} products={products} tray={tray} />;
+  return <ManualCapture token={token} products={products} tray={tray} startOpen={startOpen} />;
 }
-function ProductsRecognition({ data, action, token }: { data: any; action: Action; token: string }) {
+export function ProductsRecognition({ data, action, token, compact, openProduct }: {
+  data: any; action: Action; token: string;
+  /** Inside Products & training: no intro or add-product form (the Catalogue tab has them), capture open. */
+  compact?: boolean; openProduct?: string;
+}) {
   const [info, setInfo] = useState<any>(null),
     [error, setError] = useState(""),
     [newProduct, setNewProduct] = useState({ product_id: "", name: "", price: "" }),
     [teachTray, setTeachTray] = useState(data.trays[0]?.id || ""),
     [seconds, setSeconds] = useState(20),
     [busy, setBusy] = useState(false),
-    [open, setOpen] = useState<string>("");
+    [open, setOpen] = useState<string>(openProduct || "");
   const load = async () => {
     try {
       setInfo(await call("/staff/references", token));
@@ -2135,7 +2008,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
   const groups: any[] = status?.groups || [];
   return (
     <>
-      <section className="panel">
+      {!compact && <section className="panel">
         <h2>How new products are learned</h2>
         <p>
           Use <b>Capture now</b> to save an original frame, draw a box around the product, and review its SAM crop
@@ -2148,8 +2021,8 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
           Vision never charges on its own. Per-item weight and position come first; if the camera disagrees, the event
           goes to review. A product that was never loaded or taught can be mistaken for a similar-looking one.
         </Notice>
-        {error && <p role="alert" className="error">{error}</p>}
-      </section>
+      </section>}
+      {error && <p role="alert" className="error">{error}</p>}
       <section className="panel">
         <div className="sectionhead">
           <h2>Recognition status</h2>
@@ -2184,7 +2057,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
           <p className="muted">Start the vision service to sync references and report look-alikes.</p>
         )}
       </section>
-      <section className="panel">
+      {!compact && <section className="panel">
         <h2>Add a product</h2>
         <div className="setupgrid">
           <label>
@@ -2212,7 +2085,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
           Create product
         </button>
         <p className="muted">Then teach it (below) and load units with the tray-loading wizard to record their weights.</p>
-      </section>
+      </section>}
       <section className="panel">
         <div className="sectionhead">
           <h2>Catalogue</h2>
@@ -2238,7 +2111,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
             <button className="textbutton" onClick={() => run(() => action(`/staff/teach/${teaching.id}/stop`, {}))}>Stop</button>
           </div>
         )}
-        <TeachCamera token={token} products={data.products} refs={refs} sessions={info?.teach_sessions || []}
+        <TeachCamera startOpen={compact} token={token} products={data.products} refs={refs} sessions={info?.teach_sessions || []}
           tray={teachTray} busy={busy || !!teaching} run={run} action={action} />
 
         <table>
@@ -2301,7 +2174,7 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
   );
 }
 
-function OverviewAlerts({ data, pending, token }: { data: any; pending: any[]; token: string }) {
+export function OverviewAlerts({ data, pending, token }: { data: any; pending: any[]; token: string }) {
   const [drift, setDrift] = useState<any[]>([]),
     [open, setOpen] = useState(0);
   useEffect(() => {

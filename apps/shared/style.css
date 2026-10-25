@@ -1116,3 +1116,63 @@ label.inline {
 .framebox2 { position: absolute; border: 2px solid #ffd23f; pointer-events: none; }
 .framecell small { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.6); padding: 2px 6px; font-size: 12px; }
 @media (max-width: 1000px) { .recordgrid { grid-template-columns: 1fr; } }
+
+/* ---------- Staff shell: status chips, grouped nav, tabs ---------- */
+.statuschips { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.statuschips .chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; font-weight: 600; color: #20372f; cursor: pointer; }
+.statuschips .chip:hover { filter: brightness(0.96); }
+.chip .dot { width: 9px; height: 9px; border-radius: 50%; background: #b9c4bd; }
+.chip.ok .dot { background: #2f9a63; }
+.chip.bad .dot { background: #d0443a; }
+.navgroup { margin-bottom: 18px; }
+.navgroup > p { margin: 0 0 6px 14px; font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
+nav button { margin-bottom: 4px; padding: 10px 14px; }
+.stafflayout main { padding: 32px 40px; }
+.stafflayout h1 { font-size: 32px; letter-spacing: -1px; margin: 0 0 6px; }
+.stafflayout main > .lede { margin-top: 0; }
+.pagetabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.pagetabs button { background: none; border: 0; border-bottom: 3px solid transparent; border-radius: 0; color: var(--muted); padding: 10px 14px; }
+.pagetabs button.selected { color: var(--green); border-bottom-color: var(--green); }
+.panel .pagetabs { margin-bottom: 0; border-bottom: 0; }
+
+/* ---------- Home ---------- */
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
+.tile { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; background: #fff; color: #20372f; border: 1px solid var(--line); border-left: 5px solid #2f9a63; padding: 16px 18px; text-align: left; font-weight: 400; }
+.tile.attention { border-left-color: #d0443a; }
+.tile span { color: var(--muted); font-size: 14px; }
+.tile strong { font-size: 26px; }
+.tile small { color: var(--green); display: inline-flex; align-items: center; gap: 4px; }
+.homegrid, .livegrid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); gap: 20px; align-items: start; }
+.homegrid .panel, .livegrid .panel { margin-top: 0; margin-bottom: 20px; }
+.quickactions { display: grid; gap: 10px; }
+.quickactions button { justify-content: flex-start; }
+.bignumber { font-size: 34px; font-weight: 700; margin: 4px 0; }
+.camerahelp { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px; max-width: 460px; text-align: left; }
+.camerahelp ol { margin: 6px 0 0; padding-left: 20px; line-height: 1.6; }
+.camerahelp code { color: #cfe7d8; }
+
+/* ---------- Review queue ---------- */
+.queue { display: grid; grid-template-columns: minmax(280px, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
+.queuelist { position: sticky; top: 12px; margin-top: 0; padding: 14px; }
+.queuetools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+.queuetools button.secondary { padding: 8px 12px; }
+.queuelist ul { list-style: none; margin: 0; padding: 0; max-height: calc(100dvh - 300px); overflow: auto; }
+.queuelist li { display: flex; gap: 8px; align-items: flex-start; border-bottom: 1px solid var(--line); padding: 6px 4px; }
+.queuelist li.current { background: #eef5f0; border-radius: 6px; }
+.queuelist li > button { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; background: none; border: 0; color: #20372f; padding: 4px; text-align: left; font-weight: 400; }
+.queuelist li > input { margin-top: 10px; }
+.queuelist small { font-size: 13px; }
+.queuedetail { margin-top: 0; }
+.queuedetail .review { border: 0; padding: 0; margin: 0; }
+
+@media (max-width: 1000px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .homegrid, .livegrid, .queue { grid-template-columns: 1fr; }
+  .queuelist { position: static; }
+  .statuschips { order: 3; width: 100%; }
+  header { height: auto; flex-wrap: wrap; padding: 12px 16px; }
+}
+.queuelist li > input, .queuetools input[type="checkbox"] { width: auto; flex: none; margin: 10px 0 0; }
+.queuetools label.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.queuetools label.inline input { margin: 0; }
+.queuelist li > button b { font-size: 15px; }

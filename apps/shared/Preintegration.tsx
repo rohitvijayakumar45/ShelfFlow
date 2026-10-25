@@ -1,9 +1,11 @@
 import { useEffect, useState, FormEvent } from "react";
-import { call, money } from "./api";
+import { API, call, money } from "./api";
 import { AuthImage, EvidencePlayer } from "./Insights";
 
-export function Preintegration({ data, token, action }: {
+export function Preintegration({ data, token, action, stockOnly }: {
   data: any; token: string; action: (path: string, body: unknown) => Promise<any>;
+  /** Stock page: only counted stock and manual movements (camera suggestions live in the review queue). */
+  stockOnly?: boolean;
 }) {
   const [product, setProduct] = useState(data.products[0]?.id || "");
   const [tray, setTray] = useState(data.trays[0]?.id || "");
@@ -32,7 +34,7 @@ export function Preintegration({ data, token, action }: {
   const recent = (data.recent_taps || []).filter((t: any) => Date.now() / 1000 - t.captured < 120);
   async function snapshot() {
     try {
-      const response = await fetch("/staff/camera/preview", { headers: { Authorization: `Bearer ${token}` } });
+      const response = await fetch(API + "/staff/camera/preview", { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw Error("No fresh camera image. Check camera power and hotspot.");
       setImage(URL.createObjectURL(await response.blob()));
     } catch (e) { setError(String(e)); }
@@ -62,15 +64,15 @@ export function Preintegration({ data, token, action }: {
   return <>
     <section className="notice"><div><b>Assisted demonstration · weights unavailable</b><p>Staff confirm stock and each item movement. RFID taps identify bracelets; camera labels are suggestions. Unknown items stay unpriced until staff identify them. No camera-only automatic billing.</p></div></section>
     {error && <p className="error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
-    <CameraSuggestions data={data} token={token} action={action} />
-    <section className="panel"><h2>Camera and readers</h2><p>Camera: <b>{camera?.available ? "fresh frames available" : "unavailable — reconnect camera before visual checks"}</b></p>
+    {!stockOnly && <CameraSuggestions data={data} token={token} action={action} />}
+    {!stockOnly && <section className="panel"><h2>Camera and readers</h2><p>Camera: <b>{camera?.available ? "fresh frames available" : "unavailable — reconnect camera before visual checks"}</b></p>
       {camera?.available && <p>Current suggestions: {(camera.predictions || []).map((p: any) => p.product || "Unknown").join(", ") || "No products detected"}</p>}
       <button className="secondary" onClick={snapshot} disabled={!camera?.available}>Show fresh detection image</button>
       {image && <div><img src={image} style={{ maxWidth: "100%" }} alt="Captured detector image; still image, not live video" /><p className="muted">Still image captured when requested. Refresh to see changes.</p></div>}
       <p>Recent reader activity (last two minutes): R1 {recent.filter((t: any) => t.reader === "R1").length} · R2 {recent.filter((t: any) => t.reader === "R2").length}. Counts are received reports, not a physical tap-test result.</p>
       {recent.slice(0, 6).map((t: any) => <p key={t.event_id}>{t.reader} · {t.uid} · {new Date(t.captured * 1000).toLocaleTimeString()}</p>)}
       <p className="muted">Use Gate & bracelets for verified handover. R2 scans do not take payment or close a session automatically.</p>
-    </section>
+    </section>}
     <section className="panel"><h2>Counted stock and confirmed movements</h2><p>This is a separate temporary inventory ledger. Existing measured units and calibration are preserved. Enter the number physically remaining on the shelf before recording pickups.</p>
       <form onSubmit={e => submit("MOVE", e)}>{fields}
         <label>Customer session<select value={session} onChange={e => setSession(e.target.value)}><option value="">Choose an active customer</option>{active.map((s: any) => <option key={s.id} value={s.id}>{s.customer_alias} · {s.id.slice(0, 8)}</option>)}</select></label>
@@ -100,7 +102,7 @@ function CameraSuggestions({ data, token, action }: { data: any; token: string; 
   </section>;
 }
 
-function SuggestionCard({ s, data, token, action, done }: { s: any; data: any; token: string; action: (path: string, body: unknown) => Promise<any>; done: () => void }) {
+export function SuggestionCard({ s, data, token, action, done }: { s: any; data: any; token: string; action: (path: string, body: unknown) => Promise<any>; done: () => void }) {
   const [product, setProduct] = useState(s.product_id || "");
   const [session, setSession] = useState(s.session_id || "");
   const [direction, setDirection] = useState(s.action);
