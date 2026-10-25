@@ -62,6 +62,7 @@ Includes migrations, seeding, apps, PostgreSQL, Redis, Mosquitto, durable MQTT i
 - [Standalone HX711 + 3 kg load cell weight test](firmware/hx711-test/README.md)
 - [Requirements audit, 12 Oct 2026](docs/audit-2026-10-12.md)
 - [Mixed-product trays: per-unit weights, weight-first matching](docs/mixed-trays.md)
+- [Train products from video: record, SAM 2.1 boxes, YOLO26n](docs/training.md)
 - [New products without retraining: restock auto-crops, teach mode, look-alikes, returns](docs/fewshot-learning.md)
 - [Immediate manual capture, SAM crop preview and gallery approval](docs/manual-capture.md)
 - [Dataset capture, annotation and training](docs/dataset.md)

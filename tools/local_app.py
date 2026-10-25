@@ -65,18 +65,24 @@ def prepare():
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('service',choices=['setup','backend','vision'])
+    parser.add_argument('service',choices=['setup','backend','vision','trainer'])
     args=parser.parse_args()
     os.chdir(ROOT)
     if args.service=='setup':prepare();return
     load_dotenv(LOCAL/'runtime.env',override=True)
+    import sys
     if args.service=='backend':
         os.environ.setdefault('MANUAL_CAPTURE_WORKER', 'true')
         import uvicorn
         uvicorn.run('backend.main:app',host='127.0.0.1',port=8000,access_log=False)
+    elif args.service=='trainer':
+        # Raw shared preview (8765), not the annotated detector preview: training needs untouched frames.
+        sys.argv=['tools.trainer','--source',os.getenv('TRAINER_SOURCE','http://127.0.0.1:8765/stream')]
+        from tools.trainer import main as trainer
+        trainer()
     else:
-        import sys
         import runpy
+        from vision.training import resolve_device  # cuda:0 when a CUDA PyTorch build is installed, else cpu
         camera=os.getenv('PHYSICAL_CAMERA_URL','http://10.92.123.251')
         # Camera tuning is not stored on the camera: re-apply the measured best setting at every start.
         # 8 MHz / 640x480 / quality 12 gave ~10 fps; 20 MHz hung the camera, quality 10 fell below 1 fps.
@@ -88,9 +94,16 @@ def main():
             print(f'Camera tuned: {resolution} {clock} MHz quality {quality}',flush=True)
         except Exception as exc:
             print('Camera tuning not applied ('+type(exc).__name__+'); continuing with the camera default',flush=True)
+        # A YOLO26n model activated on the Train products page names products directly.
+        # SHELFFLOW_DETECTOR=gallery keeps the DINOv2 gallery path (item detector + references).
+        trained=ROOT/'models/trained/active.pt'
+        if trained.is_file() and os.getenv('SHELFFLOW_DETECTOR','trained')!='gallery':
+            print('Vision: trained YOLO26n product model',trained,flush=True)
+            detector=['--weights',str(trained)]
+        else:
+            detector=['--item-weights','models/shelf-pilot-item-detector.pt','--gallery','models/shelf-pilot-gallery.npz']
         sys.argv=['vision.run','--camera',camera,'--camera-key',os.environ['CAMERA_KEY'],
-                  '--config',str(LOCAL/'vision-config.json'),'--item-weights','models/shelf-pilot-item-detector.pt',
-                  '--gallery','models/shelf-pilot-gallery.npz','--device','cuda:0','--transport','stream',
+                  '--config',str(LOCAL/'vision-config.json'),*detector,'--device',resolve_device('auto'),'--transport','stream',
                   '--stream-url','http://127.0.0.1:8765/stream','--sensor-dir',str(LOCAL/'usb/delivered'),
                   '--device-key',os.environ['DEVICE_SECRET'],'--spool',str(LOCAL/'vision-spool')]
         runpy.run_module('vision.run',run_name='__main__')

@@ -1069,3 +1069,50 @@ label.inline {
 .capture-coordinates{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;max-width:640px;margin:12px 0}
 .capture-previews{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;max-width:640px;margin:16px 0}
 .capture-previews figure{margin:0}.capture-previews img{display:block;width:100%;height:180px;object-fit:contain;background:#eee}
+/* ---------- Train products ---------- */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.chip { border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: 14px; background: white; }
+.chip.ok { border-color: #8fc4a8; background: #eaf5ee; }
+.chip.warn { border-color: #e3c27a; background: #fbf4e2; }
+.chip.bad { border-color: #e2a4a4; background: #fbeaea; }
+.trainsteps li { margin-bottom: 6px; }
+.recordgrid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 2fr); gap: 24px; align-items: start; }
+.recordside { display: flex; flex-direction: column; gap: 14px; }
+.recordside label { display: flex; flex-direction: column; gap: 6px; }
+.livebox { position: relative; background: #101614; border-radius: 8px; overflow: hidden; aspect-ratio: 4 / 3; }
+.livebox canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+.liveempty { position: absolute; inset: 0; display: grid; place-items: center; color: #b7c4bd; }
+.recbadge { position: absolute; left: 10px; top: 10px; background: rgba(0, 0, 0, 0.65); color: white; padding: 6px 12px; border-radius: 6px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.recdot { width: 12px; height: 12px; border-radius: 50%; background: #e5372f; animation: recblink 1s steps(2) infinite; }
+@keyframes recblink { 50% { opacity: 0.2; } }
+.recwarn { position: absolute; left: 10px; bottom: 10px; right: 10px; background: rgba(160, 95, 0, 0.88); color: white; padding: 6px 12px; border-radius: 6px; }
+.recbutton { font-size: 18px; padding: 16px 22px; }
+.recbutton.stop { background: #b42f28; border-color: #b42f28; }
+.tips { margin: 0; padding-left: 18px; color: var(--muted); }
+.tips li { margin-bottom: 6px; }
+.rowactions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.rowactions button { padding: 8px 12px; }
+.selectedrow { background: #eef5f0; }
+.progress { position: relative; height: 22px; border-radius: 6px; background: #e4e9e2; overflow: hidden; margin: 6px 0; min-width: 140px; }
+.progress span { position: absolute; inset: 0 auto 0 0; background: #4f9b78; transition: width 0.4s; }
+.progress b { position: relative; display: block; text-align: center; font-size: 13px; line-height: 22px; }
+.trainchart { width: 100%; height: 60px; background: white; border: 1px solid var(--line); border-radius: 6px; }
+.trainchart polyline { stroke: var(--green); }
+.markstage { position: relative; cursor: crosshair; user-select: none; touch-action: none; border-radius: 8px; overflow: hidden; background: #101614; }
+.markimg img, .markimg .imgwait { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; pointer-events: none; }
+.markbox { position: absolute; border: 3px solid #39d17a; box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.25); pointer-events: none; }
+.markpoint { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; background: #39d17a; border: 3px solid white; pointer-events: none; }
+.framescrub { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.framescrub input { width: 100%; }
+.reviewmetrics { margin: 0 0 10px; }
+.reviewtabs { margin: 0; }
+.reviewtabs button { padding: 8px 12px; text-transform: capitalize; }
+.framegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.framecell { position: relative; display: block; padding: 0; background: #101614; border: 3px solid #c9372c; border-radius: 6px; overflow: hidden; color: white; font-weight: 400; text-align: left; }
+.framecell.in { border-color: #3aa76d; }
+.framecell.out .framethumb { opacity: 0.45; }
+.framethumb img, .framethumb .imgwait { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.imgwait { background: #26302c; }
+.framebox2 { position: absolute; border: 2px solid #ffd23f; pointer-events: none; }
+.framecell small { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(0, 0, 0, 0.6); padding: 2px 6px; font-size: 12px; }
+@media (max-width: 1000px) { .recordgrid { grid-template-columns: 1fr; } }

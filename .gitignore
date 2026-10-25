@@ -17,3 +17,5 @@ firmware/**/include/secrets.h
 firmware/camera/include/board_config.h
 reports/*.xml
 npm-debug.log*
+.platformio-core/
+data/logs/

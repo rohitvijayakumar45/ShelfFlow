@@ -10,6 +10,11 @@ export default defineConfig({
         rewrite: (p) => p.replace(/^\/api/, ""),
       },
       "/ws": { target: "ws://127.0.0.1:8000", ws: true },
+      // Local product-training service (python -m tools.trainer).
+      "/trainer": {
+        target: "http://127.0.0.1:8001",
+        rewrite: (p) => p.replace(/^\/trainer/, ""),
+      },
     },
   },
 });

@@ -17,10 +17,12 @@ import {
   Scales,
   Sparkle,
   ChartLine,
+  GraduationCap,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
 import { Preintegration } from "./Preintegration";
 import { ManualCapture } from "./ManualCapture";
+import { TrainProducts } from "./Training";
 import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
 
 function Brand() {
@@ -611,6 +613,7 @@ const nav = [
   ["Shelf setup", Tray],
   ["Tray loading", Scales],
   ["Products & recognition", Sparkle],
+  ["Train products", GraduationCap],
   ["Evidence review", Camera],
   ["Insights", ChartLine],
   ["Sessions & receipts", Users],
@@ -918,6 +921,7 @@ export function Staff() {
                   <ProductsRecognition data={data} action={action} token={token} />
                 </>
               )}
+              {page === "Train products" && <TrainProducts data={data} token={token} />}
               {page === "Insights" && <Insights data={data} action={action} token={token} />}
               {page === "Evidence review" && (
                 <section className="panel">
@@ -2137,6 +2141,8 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
           Use <b>Capture now</b> to save an original frame, draw a box around the product, and review its SAM crop
           before adding it to the gallery. Automatic <b>Teach</b> still collects diverse views over a short session.
           Measured restocking can also supply before/after reference crops. Reject references that show the wrong thing.
+          <b>Train products</b> (left menu) records a short video per product, boxes it with SAM 2.1 and trains
+          the YOLO26n product model.
         </p>
         <Notice>
           Vision never charges on its own. Per-item weight and position come first; if the camera disagrees, the event

@@ -55,7 +55,8 @@ def run(args):
         detectors={tray:AgnosticDetector(args.item_weights,args.device) for tray in config['trays']}
         models.update(detector=file_version(args.item_weights),embedder=gallery.embedder_name,mask=gallery.mask)
     else:
-        detectors={tray: YoloDetector(args.weights,{int(k):v for k,v in config['sku_map'].items()},args.device) if args.weights else UnavailableDetector() for tray in config['trays']}
+        sku_map={int(k):v for k,v in config['sku_map'].items()} if config.get('sku_map') else None
+        detectors={tray: YoloDetector(args.weights,sku_map,args.device) if args.weights else UnavailableDetector() for tray in config['trays']}
         if args.weights:models['detector']=file_version(args.weights)
     # Hands: from the detector's "hand" class when trained with one, else MediaPipe if installed, else none.
     hand_finder=None

@@ -33,6 +33,8 @@ class YoloDetector:
             raise FileNotFoundError("Custom SKU weights unavailable; pretrained COCO is not an exact SKU detector")
         from ultralytics import YOLO
         self.model = YOLO(weights)
+        if sku_map is None:  # models from the Train products page name their classes by product ID
+            sku_map = {int(k): str(v) for k, v in self.model.names.items()}
         self.sku_map, self.device = sku_map, device
         if set(map(int, self.model.names)) != set(map(int, sku_map)):
             raise ValueError("Custom model classes do not match catalogue mapping")

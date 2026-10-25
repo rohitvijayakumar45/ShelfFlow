@@ -13,6 +13,7 @@ Run each long-running command in its own terminal from the repository root:
 .\.venv\Scripts\python.exe -m tools.camera_preview --camera http://CAMERA_IP
 .\.venv\Scripts\python.exe -m tools.detector_preview
 .\.venv\Scripts\python.exe -m tools.local_app vision
+.\.venv\Scripts\python.exe -m tools.local_app trainer   # Train products page (docs/training.md)
 ```
 
 Replace CAMERA_IP with the IP printed by the camera after joining the hotspot. Set `PHYSICAL_CAMERA_URL` in ignored `data/integration/runtime.env` to the same camera URL before starting vision. Keep only one camera connection: the detector and vision collector consume the shared preview on port 8765.

@@ -1,5 +1,15 @@
 # ShelfFlow handoff (state as of 25 October 2026, ~02:00)
 
+**Later update — new laptop and video training (25 Oct evening):** The project now also runs on a second laptop
+(RTX 4050, CUDA PyTorch 2.10). There the shelf controller is **COM7** and the programmer **COM9** (pass
+`--port COM7` to `tools.usb_bridge`); git-ignored files were restored from the old machine and the absolute
+paths in `runtime.env` re-pointed to the new folder. PlatformIO lives in the project's `.platformio-core/`; from
+that long path ESP32 compiles exceed the Windows 32,767-character command limit, so build firmware with a short
+`PLATFORMIO_CORE_DIR` (e.g. the default `%USERPROFILE%\.platformio`). No firmware was changed or flashed. New:
+**Train products** page (record a clip → SAM 2.1 boxes → blur/odd-frame review → YOLO26n) served by
+`tools.local_app trainer`; see [training.md](training.md). Camera start-up brownouts (section 8) are still
+unsolved. Full stack verified live: controller events delivered, camera 11 fps, 225 tests passed.
+
 **Later update — manual capture:** The manual button now saves the latest raw
 camera snapshot immediately into a durable queue, then uses a user-drawn box
 and background SAM segmentation. Staff preview and approve the tight original
