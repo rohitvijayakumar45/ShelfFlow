@@ -1,0 +1,22 @@
+{"t": 1792869351.5, "time": "00:45:51", "kind": "START", "camera": "http://10.12.94.251", "ssid": "X200T", "bssid": "e2:f3:0a:85:04:65", "state": "connected"}
+{"t": 1792869351.6, "time": "00:45:51", "kind": "WIFI", "ssid": "X200T", "bssid": "e2:f3:0a:85:04:65", "state": "connected"}
+{"t": 1792869354.1, "time": "00:45:54", "kind": "CAMERA_GONE", "last_uptime_s": null, "error": "ConnectTimeout"}
+{"t": 1792869430.0, "time": "00:47:09", "kind": "WIFI", "ssid": "X200T", "bssid": "d6:f3:bf:80:dc:f7", "state": "connected"}
+{"t": 1792869810.7, "time": "00:53:30", "kind": "WIFI", "ssid": null, "bssid": null, "state": "associating"}
+{"t": 1792869814.0, "time": "00:53:33", "kind": "WIFI", "ssid": "X200T", "bssid": "86:26:ff:8a:37:f0", "state": "connected"}
+{"t": 1792870721.5, "time": "01:08:41", "kind": "CAMERA_BACK", "gap_s": 1370, "uptime_s": 3, "rssi": -62, "verdict": "REBOOTED while away"}
+{"t": 1792870991.3, "time": "01:13:11", "kind": "CAMERA_GONE", "last_uptime_s": 267, "error": "ConnectTimeout"}
+{"t": 1792871005.8, "time": "01:13:25", "kind": "WIFI", "ssid": "X200T", "bssid": "4e:02:bd:4c:d7:93", "state": "connected"}
+{"t": 1792871005.8, "time": "01:13:25", "kind": "CAMERA_BACK", "gap_s": 20, "uptime_s": 5, "rssi": -53, "verdict": "REBOOTED while away"}
+{"t": 1792871087.3, "time": "01:14:47", "kind": "CAMERA_GONE", "last_uptime_s": 80, "error": "ConnectTimeout"}
+{"t": 1792871090.6, "time": "01:14:50", "kind": "WIFI", "ssid": "X200T", "bssid": "72:af:0a:bf:7f:63", "state": "connected"}
+{"t": 1792871102.0, "time": "01:15:02", "kind": "CAMERA_BACK", "gap_s": 20, "uptime_s": 101, "rssi": -57, "verdict": "STAYED RUNNING, was off the network"}
+{"t": 1792873441.1, "time": "01:54:01", "kind": "CAMERA_GONE", "last_uptime_s": 2434, "error": "ConnectTimeout"}
+{"t": 1792873444.6, "time": "01:54:04", "kind": "CAMERA_BACK", "gap_s": 9, "uptime_s": 2443, "rssi": -54, "verdict": "STAYED RUNNING, was off the network"}
+{"t": 1792875370.5, "time": "02:26:10", "kind": "CAMERA_GONE", "last_uptime_s": 4364, "error": "ConnectTimeout"}
+{"t": 1792875373.7, "time": "02:26:13", "kind": "CAMERA_BACK", "gap_s": 9, "uptime_s": 4372, "rssi": -59, "verdict": "STAYED RUNNING, was off the network"}
+{"t": 1792875669.3, "time": "02:31:09", "kind": "CAMERA_GONE", "last_uptime_s": 4662, "error": "ConnectTimeout"}
+{"t": 1792875678.4, "time": "02:31:18", "kind": "WIFI", "ssid": null, "bssid": null, "state": "associating"}
+{"t": 1792886485.4, "time": "05:31:25", "kind": "WIFI", "ssid": "Shaun", "bssid": "ca:de:2c:3c:a6:6b", "state": "connected"}
+{"t": 1792900810.8, "time": "09:30:10", "kind": "WIFI", "ssid": "VITC-HOS2-4", "bssid": "44:12:44:d2:ad:e0", "state": "connected"}
+{"t": 1792900995.3, "time": "09:33:15", "kind": "WIFI", "ssid": "VITC-HOS2-4", "bssid": "44:12:44:d2:ad:f0", "state": "connected"}

@@ -71,6 +71,7 @@ def main():
     if args.service=='setup':prepare();return
     load_dotenv(LOCAL/'runtime.env',override=True)
     if args.service=='backend':
+        os.environ.setdefault('MANUAL_CAPTURE_WORKER', 'true')
         import uvicorn
         uvicorn.run('backend.main:app',host='127.0.0.1',port=8000,access_log=False)
     else:

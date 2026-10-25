@@ -63,6 +63,7 @@ Includes migrations, seeding, apps, PostgreSQL, Redis, Mosquitto, durable MQTT i
 - [Requirements audit, 12 Oct 2026](docs/audit-2026-10-12.md)
 - [Mixed-product trays: per-unit weights, weight-first matching](docs/mixed-trays.md)
 - [New products without retraining: restock auto-crops, teach mode, look-alikes, returns](docs/fewshot-learning.md)
+- [Immediate manual capture, SAM crop preview and gallery approval](docs/manual-capture.md)
 - [Dataset capture, annotation and training](docs/dataset.md)
 - [Event contracts, fusion and recovery](docs/architecture.md)
 - [Security and retention](docs/security.md)

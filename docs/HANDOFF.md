@@ -1,5 +1,16 @@
 # ShelfFlow handoff (state as of 25 October 2026, ~02:00)
 
+**Later update — manual capture:** The manual button now saves the latest raw
+camera snapshot immediately into a durable queue, then uses a user-drawn box
+and background SAM segmentation. Staff preview and approve the tight original
+crop plus SAM cutout before either enters the gallery. Migration 0013 and
+`MANUAL_CAPTURE_WORKER` are required (the local backend launcher enables it).
+Automatic Teach is unchanged. See [manual-capture.md](manual-capture.md).
+This supersedes the manual one-view teach description in section 9.2 below.
+Validation: 220 Python tests and both app production builds passed. A live
+Sanitizer snapshot saved in 250 ms; SAM inference took 1,078 ms after model
+loading. Its crop was left READY and unapproved for staff inspection.
+
 Everything needed to pick the project up where it stopped: what works, what is broken, what changed in the
 24–25 October sessions, how to run it, and what to do next. Read sections 1–3 first.
 

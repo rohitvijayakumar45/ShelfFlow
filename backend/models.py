@@ -298,6 +298,27 @@ class ProductReference(Base):
     created: Mapped[float] = mapped_column(Float, default=time.time)
     updated: Mapped[float] = mapped_column(Float, default=time.time)
 
+class ManualCapture(Base):
+    """Immutable camera snapshot plus a reviewed, versioned segmentation draft."""
+    __tablename__ = "manual_captures"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    request_key: Mapped[str] = mapped_column(String, unique=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    tray_id: Mapped[str] = mapped_column(ForeignKey("trays.id"))
+    original_file: Mapped[str] = mapped_column(String)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default="CAPTURED")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    box: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    crop_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    plain_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    reference_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created: Mapped[float] = mapped_column(Float, default=time.time)
+    updated: Mapped[float] = mapped_column(Float, default=time.time)
+
+
 class TeachSession(Base):
     """Staff shows a product to the camera; vision keeps diverse views as references."""
     __tablename__ = "teach_sessions"

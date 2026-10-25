@@ -2449,6 +2449,329 @@
      }
     }
    }
+  },
+  "/staff/camera/raw-preview": {
+   "get": {
+    "summary": "Raw Camera Preview",
+    "operationId": "raw_camera_preview_staff_camera_raw_preview_get",
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ]
+   }
+  },
+  "/staff/manual-captures": {
+   "post": {
+    "summary": "Save Manual Capture",
+    "operationId": "save_manual_capture_staff_manual_captures_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SaveManualCapture"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   },
+   "get": {
+    "summary": "Manual Captures",
+    "operationId": "manual_captures_staff_manual_captures_get",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "product_id",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Product Id"
+      }
+     },
+     {
+      "name": "before",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Before"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/manual-captures/{capture_id}": {
+   "get": {
+    "summary": "Manual Capture Status",
+    "operationId": "manual_capture_status_staff_manual_captures__capture_id__get",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "capture_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Capture Id"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/manual-captures/{capture_id}/segment": {
+   "post": {
+    "summary": "Segment Manual Capture",
+    "operationId": "segment_manual_capture_staff_manual_captures__capture_id__segment_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "capture_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Capture Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SegmentManualCapture"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/manual-captures/{capture_id}/approve": {
+   "post": {
+    "summary": "Approve Manual Capture",
+    "operationId": "approve_manual_capture_staff_manual_captures__capture_id__approve_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "capture_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Capture Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ApproveManualCapture"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/staff/manual-captures/{capture_id}/discard": {
+   "post": {
+    "summary": "Discard Manual Capture",
+    "operationId": "discard_manual_capture_staff_manual_captures__capture_id__discard_post",
+    "security": [
+     {
+      "HTTPBearer": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "capture_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Capture Id"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/Reason"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -4102,6 +4425,89 @@
      "settled"
     ],
     "title": "Weight"
+   },
+   "SaveManualCapture": {
+    "properties": {
+     "reason": {
+      "type": "string",
+      "maxLength": 500,
+      "minLength": 3,
+      "title": "Reason"
+     },
+     "product_id": {
+      "type": "string",
+      "title": "Product Id"
+     },
+     "tray_id": {
+      "type": "string",
+      "title": "Tray Id"
+     },
+     "idempotency_key": {
+      "type": "string",
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Idempotency Key"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "reason",
+     "product_id",
+     "tray_id",
+     "idempotency_key"
+    ],
+    "title": "SaveManualCapture"
+   },
+   "SegmentManualCapture": {
+    "properties": {
+     "box": {
+      "prefixItems": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "number"
+       },
+       {
+        "type": "number"
+       },
+       {
+        "type": "number"
+       }
+      ],
+      "type": "array",
+      "maxItems": 4,
+      "minItems": 4,
+      "title": "Box"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "box"
+    ],
+    "title": "SegmentManualCapture"
+   },
+   "ApproveManualCapture": {
+    "properties": {
+     "revision": {
+      "type": "integer",
+      "minimum": 1.0,
+      "title": "Revision"
+     },
+     "physical_confirmed": {
+      "type": "boolean",
+      "title": "Physical Confirmed"
+     }
+    },
+    "additionalProperties": false,
+    "type": "object",
+    "required": [
+     "revision",
+     "physical_confirmed"
+    ],
+    "title": "ApproveManualCapture"
    }
   },
   "securitySchemes": {

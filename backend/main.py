@@ -18,8 +18,20 @@ from backend import config as settings
 from backend.db import SessionLocal
 from pydantic import Field
 from typing import Literal
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="ShelfFlow", version="0.1.0", description="Continuous single-camera smart-store prototype. Simulation is explicitly labelled; real ownership is review-first.")
+@asynccontextmanager
+async def capture_lifespan(app):
+    if os.getenv('MANUAL_CAPTURE_WORKER', 'false').lower() in ('1', 'true'):
+        from backend.manual_capture import start_worker
+        start_worker()
+    try:
+        yield
+    finally:
+        from backend.manual_capture import stop_worker
+        stop_worker()
+
+app = FastAPI(title="ShelfFlow", version="0.1.0", description="Continuous single-camera smart-store prototype. Simulation is explicitly labelled; real ownership is review-first.", lifespan=capture_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","), allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type", "X-Device-Key"])
 limits = defaultdict(deque)
 
@@ -443,6 +455,88 @@ def camera_jpeg():
         return r.content
     except Exception:
         raise HTTPException(503,"Camera unavailable; check connection and credentials")
+
+
+def raw_camera_jpeg():
+    """Fetch the most recent unannotated still from the shared camera connection."""
+    import httpx
+    try:
+        response = httpx.get(os.getenv('RAW_CAMERA_URL', 'http://127.0.0.1:8765').rstrip('/')+'/jpeg',
+            timeout=2, trust_env=False)
+        response.raise_for_status()
+        if not response.headers.get('content-type', '').startswith('image/jpeg') or not response.content.startswith(b'\xff\xd8'):
+            raise ValueError('Invalid JPEG')
+        return response.content
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(503, 'No fresh original camera frame. Check camera power and hotspot; no capture was saved.')
+
+
+@app.get('/staff/camera/raw-preview')
+def raw_camera_preview(user=Depends(staff)):
+    from fastapi.responses import Response
+    return Response(raw_camera_jpeg(), media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+
+class SaveManualCapture(Reason):
+    product_id: str
+    tray_id: str
+    idempotency_key: str = Field(min_length=1, max_length=100)
+
+
+class SegmentManualCapture(StrictModel):
+    box: tuple[float, float, float, float]
+
+
+class ApproveManualCapture(StrictModel):
+    revision: int = Field(ge=1)
+    physical_confirmed: bool
+
+
+@app.post('/staff/manual-captures')
+def save_manual_capture(body: SaveManualCapture, user=Depends(staff)):
+    from backend.manual_capture import snapshot
+    return snapshot(body.product_id, body.tray_id, body.idempotency_key, body.reason, user['sub'], raw_camera_jpeg)
+
+
+@app.get('/staff/manual-captures')
+def manual_captures(product_id: str | None = None, before: float | None = None, user=Depends(staff)):
+    from backend.manual_capture import row_dict
+    with SessionLocal() as db:
+        query = select(ManualCapture).order_by(ManualCapture.created.desc())
+        if product_id:
+            query = query.where(ManualCapture.product_id == product_id)
+        if before is not None:
+            query = query.where(ManualCapture.created < before)
+        rows = list(db.scalars(query.limit(50)))
+        return {'captures': [row_dict(row) for row in rows],
+                'next_before': rows[-1].created if len(rows) == 50 else None}
+
+
+@app.get('/staff/manual-captures/{capture_id}')
+def manual_capture_status(capture_id: str, user=Depends(staff)):
+    from backend.manual_capture import row_dict
+    with SessionLocal() as db:
+        return row_dict(svc.get(db, ManualCapture, capture_id))
+
+
+@app.post('/staff/manual-captures/{capture_id}/segment')
+def segment_manual_capture(capture_id: str, body: SegmentManualCapture, user=Depends(staff)):
+    from backend.manual_capture import segment, worker_running
+    if not worker_running():
+        svc.fail('SAM worker is not running. Start tools.local_app backend or set MANUAL_CAPTURE_WORKER=true; the original is saved.', 503)
+    return segment(capture_id, body.box, user['sub'])
+
+
+@app.post('/staff/manual-captures/{capture_id}/approve')
+def approve_manual_capture(capture_id: str, body: ApproveManualCapture, user=Depends(staff)):
+    from backend.manual_capture import approve
+    return approve(capture_id, body.revision, body.physical_confirmed, user['sub'])
+
+
+@app.post('/staff/manual-captures/{capture_id}/discard')
+def discard_manual_capture(capture_id: str, body: Reason, user=Depends(staff)):
+    from backend.manual_capture import discard
+    return discard(capture_id, user['sub'])
 
 @app.get("/staff/camera/preview")
 def camera_preview(user=Depends(staff)):

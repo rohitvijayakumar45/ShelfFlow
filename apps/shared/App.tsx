@@ -20,6 +20,7 @@ import {
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
 import { Preintegration } from "./Preintegration";
+import { ManualCapture } from "./ManualCapture";
 import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
 
 function Brand() {
@@ -2082,91 +2083,12 @@ function lookStatus(status: string | null) {
   if (status === "NO_STILLS") return "no photo (camera off)";
   return "✗ " + status.replace("FAILED:", "").replaceAll("_", " ").toLowerCase();
 }
-// Live camera view for teaching, with a manual capture: each press is a one-view teach
-// session, so the crop goes through the same item detection and quality gate as Teach.
-function TeachCamera({ token, products, refs, sessions, tray, busy, run, action }: {
+// Manual snapshots are independent of the automatic teach collector.
+function TeachCamera({ token, products, tray }: {
   token: string; products: any[]; refs: any[]; sessions: any[]; tray: string; busy: boolean;
   run: (fn: () => Promise<any>) => Promise<void>; action: Action;
 }) {
-  const [show, setShow] = useState(false),
-    [product, setProduct] = useState(products[0]?.id || ""),
-    [image, setImage] = useState(""),
-    [error, setError] = useState(""),
-    [captureId, setCaptureId] = useState("");
-  useEffect(() => {
-    if (!show) return;
-    let stopped = false,
-      last = "";
-    async function load() {
-      try {
-        const r = await fetch("/api/staff/camera/preview", { headers: { Authorization: `Bearer ${token}` } });
-        if (!r.ok) throw new Error((await r.json()).detail);
-        const blob = await r.blob();
-        if (stopped) return;
-        if (last) URL.revokeObjectURL(last);
-        last = URL.createObjectURL(blob);
-        setImage(last);
-        setError("");
-      } catch (e) {
-        setError(String(e));
-      }
-    }
-    load();
-    const t = setInterval(load, 700);
-    return () => {
-      stopped = true;
-      clearInterval(t);
-      if (last) URL.revokeObjectURL(last);
-    };
-  }, [token, show]);
-  const session = sessions.find((t: any) => t.id === captureId);
-  const capturing = !!session && session.accepted < 1 && session.until > Date.now() / 1000;
-  const result = !session
-    ? ""
-    : session.accepted >= 1
-      ? "✓ View captured and added to the gallery."
-      : capturing
-        ? "Capturing… keep your hand out of the picture."
-        : "Nothing usable was seen. The product needs a box around it in the camera view (not at the very edge), with no hand over it. Adjust and capture again.";
-  const recent = refs.filter((r: any) => r.product_id === product && r.source === "TEACH").slice(-6).reverse();
-  return (
-    <div className="teachcamera">
-      <button className="secondary" onClick={() => setShow(!show)}>{show ? "Hide camera" : "Show camera and capture manually"}</button>
-      {show && (
-        <>
-          <div className="setupgrid">
-            <label>
-              Product
-              <select value={product} onChange={(e) => setProduct(e.target.value)}>
-                {products.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </label>
-          </div>
-          {error && <p className="error">{error}</p>}
-          {image && <img src={image} alt="Live tray camera" style={{ maxWidth: 480, width: "100%", display: "block", margin: "12px 0" }} />}
-          <p className="muted">Place the product on {tray} in a new pose, away from the edges, and take your hand away. Capture once the view shows a box around it.</p>
-          <button disabled={busy || capturing || !product || !tray}
-            onClick={() => run(async () => {
-              const r = await action(`/staff/products/${product}/capture`, { tray_id: tray, reason: "Manual teach capture" });
-              setCaptureId(r.teach_id);
-            })}>
-            {capturing ? "Capturing…" : "Capture view"}
-          </button>
-          {result && <p role="status">{result}</p>}
-          {recent.length > 0 && (
-            <div className="refgrid">
-              {recent.map((r: any) => (
-                <figure key={r.id} className={r.status === "ACTIVE" ? "" : "rejected"}>
-                  <CatalogueImage name={r.file} token={token} alt={`Taught view of ${product}`} />
-                  <figcaption>{r.status.toLowerCase()}</figcaption>
-                </figure>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
+  return <ManualCapture token={token} products={products} tray={tray} />;
 }
 function ProductsRecognition({ data, action, token }: { data: any; action: Action; token: string }) {
   const [info, setInfo] = useState<any>(null),
@@ -2212,10 +2134,9 @@ function ProductsRecognition({ data, action, token }: { data: any; action: Actio
       <section className="panel">
         <h2>How new products are learned</h2>
         <p>
-          No retraining and no photo sessions. Every item loaded with the tray-loading wizard is cut out of the camera's
-          before/after stills and becomes a reference automatically. For a brand-new product, use <b>Teach</b>: turn it
-          slowly in front of the camera for ~20 seconds and the system keeps the views that add something new. Reject any
-          reference that shows the wrong thing.
+          Use <b>Capture now</b> to save an original frame, draw a box around the product, and review its SAM crop
+          before adding it to the gallery. Automatic <b>Teach</b> still collects diverse views over a short session.
+          Measured restocking can also supply before/after reference crops. Reject references that show the wrong thing.
         </p>
         <Notice>
           Vision never charges on its own. Per-item weight and position come first; if the camera disagrees, the event
