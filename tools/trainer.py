@@ -335,7 +335,7 @@ def label(sid: str, body: Mark, user=Depends(staff)):
 class Train(BaseModel):
     sessions: list[str] | None = None
     epochs: int = Field(default=50, ge=1, le=300)
-    imgsz: int = Field(default=640, ge=320, le=1280)
+    imgsz: int | None = Field(default=None, ge=160, le=1280)  # default: the recorded frames' own size
 
 
 @app.post("/train")
@@ -349,6 +349,10 @@ def train(body: Train, user=Depends(staff)):
         shutil.rmtree(run, ignore_errors=True)
         raise HTTPException(422, str(exc))
     device = T.resolve_device("auto")
+    # Train at the camera's real frame size (rounded up to YOLO's stride of 32): upscaling 320x240 frames
+    # to 640 only quadruples the work. The model remembers this size and uses it when detecting.
+    longest = max((max(s.meta.get("width") or 0, s.meta.get("height") or 0) for s in chosen), default=640)
+    body.imgsz = body.imgsz or min(1280, max(320, -(-longest // 32) * 32))
     T.write_json(run / "meta.json", {"id": rid, "created": time.time(), "sessions": [s.id for s in chosen], "epochs": body.epochs,
                                      "imgsz": body.imgsz, "device": device, **summary})
     base = T.MODELS / T.YOLO_BASE
@@ -361,7 +365,7 @@ def train(body: Train, user=Depends(staff)):
         raise
     cmd = [sys.executable, "-m", "vision.training", "train", "--data", summary["yaml"], "--run-dir", str(run),
            "--epochs", str(body.epochs), "--imgsz", str(body.imgsz), "--device", device,
-           "--batch", "16" if device.startswith("cuda") else "8", "--workers", "4"]
+           "--batch", ("32" if body.imgsz <= 416 else "16") if device.startswith("cuda") else "8", "--workers", "4"]
     env = {**os.environ, "PYTHONPATH": str(T.ROOT), "PYTHONUNBUFFERED": "1"}
     log = open(run / "train.log", "w", encoding="utf-8", errors="replace")
     job["proc"] = subprocess.Popen(cmd, cwd=run, env=env, stdout=log, stderr=subprocess.STDOUT)

@@ -72,7 +72,7 @@ class DetectorPreview(camera_preview.SharedCamera):
             if frame is None:
                 continue
             h, w = frame.shape[:2]
-            detected = self.model.predict(frame, device=self.device, imgsz=640, conf=.25, verbose=False)[0]
+            detected = self.model.predict(frame, device=self.device, imgsz=self.model.overrides.get('imgsz', 640) if self.products_model else 640, conf=.25, verbose=False)[0]
             boxes, crops = [], []
             for box in detected.boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())

@@ -35,7 +35,14 @@ def write_json(path, value):
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows: a reader (the trainer service) briefly holds the file
+            if attempt == 19:
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def read_json(path, default=None):
@@ -242,7 +249,7 @@ def _link(src, dst):
         shutil.copyfile(src, dst)
 
 
-def build_dataset(chosen, out, max_per_session=400):
+def build_dataset(chosen, out, max_per_session=250):
     """YOLO dataset from included frames. Split by ~1 s chunks so near-identical neighbours never
     straddle train/val. Long clips are thinned evenly to max_per_session frames."""
     out = Path(out)
@@ -308,7 +315,10 @@ def train_main(a):
         state.update(values)
         if force or time.monotonic() - last_write[0] > 0.5:
             last_write[0] = time.monotonic()
-            write_json(progress_path, state)
+            try:
+                write_json(progress_path, state)
+            except OSError:
+                pass  # progress display must never stop training; the next update retries
 
     try:
         from ultralytics import YOLO
@@ -350,7 +360,8 @@ def train_main(a):
         images = sum(1 for _ in (Path(a.data).parent / "images").rglob("*.jpg"))
         model.train(data=a.data, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device, project=str(run), name="yolo",
                     exist_ok=True, patience=max(10, a.epochs // 3), cache="ram" if images <= 1500 else False,
-                    workers=a.workers, plots=False, verbose=False, seed=0)
+                    workers=a.workers, plots=False, verbose=False, seed=0,
+                    close_mosaic=0)  # no mid-run dataloader rebuild (~35 s on Windows); one fixed camera needs no final un-mosaicked phase
         trainer = model.trainer
         best = Path(trainer.best)
         if not best.is_file():

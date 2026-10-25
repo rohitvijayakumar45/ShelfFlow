@@ -351,7 +351,7 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 </select>
               </label>
               <button disabled={busy || !!jobRunning || !!rec}
-                onClick={() => run(() => tcall("/train", token, { epochs, imgsz: 640 }))}>
+                onClick={() => run(() => tcall("/train", token, { epochs }))}>
                 <Play size={20} weight="fill" /> Train on {trainable.length} product{trainable.length === 1 ? "" : "s"}
               </button>
             </div>
