@@ -26,6 +26,11 @@ class DetectorPreview(camera_preview.SharedCamera):
         self.device = device
         self.predictions = []
         self.processing_ms = None
+        # Follow the model switched on in Train products: reload when active.pt changes (no restart needed).
+        self.trained = Path(__file__).resolve().parents[1] / 'models/trained/active.pt'
+        self.follow = os.getenv('SHELFFLOW_DETECTOR', 'trained') != 'gallery'
+        self.loaded_mtime = self.trained.stat().st_mtime if products_model and self.trained.is_file() else None
+        self.checked = 0.0
         # Same live references as the vision service (teach, restock, staff labels), so a
         # newly taught product is named here too instead of showing as Unknown.
         self.sync, self.synced = None, 0.0
@@ -62,6 +67,15 @@ class DetectorPreview(camera_preview.SharedCamera):
                 jpeg, headers, last = self.source.jpeg, self.source.headers.copy(), self.source.serial
                 received = self.source.received
             started = time.monotonic()
+            if self.follow and started - self.checked > 3:
+                self.checked = started
+                try:
+                    mtime = self.trained.stat().st_mtime if self.trained.is_file() else None
+                    if mtime and mtime != self.loaded_mtime:
+                        self.model, self.products_model, self.loaded_mtime = YOLO(str(self.trained)), True, mtime
+                        print('Switched to the trained product model', self.trained, flush=True)
+                except Exception as exc:  # half-written or unreadable: keep the current model, retry next check
+                    print('Model reload failed:', type(exc).__name__, flush=True)
             if self.sync and started - self.synced > 10:
                 self.synced = started
                 try:

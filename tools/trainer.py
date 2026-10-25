@@ -408,9 +408,14 @@ def cancel_job(force: bool = False, user=Depends(staff)):
     if job["kind"] == "train":
         run = RUNS / job["run"]
         (run / "STOP").write_text("stop", encoding="ascii")
-        job.update(phase="stopping", message="Stopping after the current batch; the best weights so far are kept")
-        if force and job.get("proc"):
-            job["proc"].kill()
+        epochs_done = len(((job.get("train") or {}).get("history")) or [])
+        if force or epochs_done == 0:
+            # Nothing learned yet (still starting up): stop at once instead of waiting for the first batch.
+            if job.get("proc"):
+                job["proc"].kill()
+            job.update(phase="stopping", message="Stopping now; no epoch had finished, so this run has no model")
+        else:
+            job.update(phase="stopping", message=f"Stopping after the current batch; keeping the best of {epochs_done} epoch(s)")
     else:
         job["message"] = "Cancelling"
     return {"ok": True}
@@ -430,6 +435,21 @@ def get_run(rid):
     return path
 
 
+def salvage(path):
+    """A run stopped or killed after some epochs still has YOLO's best checkpoint: keep it as the run's model."""
+    best = path / "yolo" / "weights" / "best.pt"
+    progress = T.read_json(path / "progress.json", {}) or {}
+    history = progress.get("history") or []
+    if (path / "best.pt").is_file() or not best.is_file() or not history:
+        return
+    shutil.copyfile(best, path / "best.pt")
+    top = max(history, key=lambda h: h.get("map50") or 0)
+    meta = T.read_json(path / "meta.json", {}) or {}
+    T.write_json(path / "result.json", {"classes": meta.get("classes"), "metrics": {k: top[k] for k in ("precision", "recall", "map50", "map50_95") if k in top},
+                                        "per_class": {}, "epochs_run": len(history), "stopped_early": True, "device": meta.get("device"),
+                                        "finished": time.time(), "salvaged": True})
+
+
 @app.get("/runs")
 def list_runs(user=Depends(staff)):
     active = T.read_json(ACTIVE, {}) or {}
@@ -439,9 +459,40 @@ def list_runs(user=Depends(staff)):
             meta = T.read_json(path / "meta.json")
             if not meta:
                 continue
-            out.append({**meta, "result": T.read_json(path / "result.json"), "has_weights": (path / "best.pt").is_file(),
-                        "active": active.get("run") == path.name})
+            running = job_busy() and S.job.get("kind") == "train" and S.job.get("run") == path.name
+            if not running:
+                salvage(path)
+            result = T.read_json(path / "result.json")
+            progress = T.read_json(path / "progress.json", {}) or {}
+            has_weights = (path / "best.pt").is_file()
+            if running:
+                status = "running"
+            elif result and has_weights:
+                status = "stopped early" if result.get("stopped_early") else "finished"
+            elif progress.get("phase") == "failed":
+                status = "failed"
+            else:
+                status = "stopped, no model"
+            recordings = []
+            for sid in meta.get("sessions", []):
+                s = T.read_json(SESSIONS / sid / "meta.json")
+                if s:
+                    recordings.append({"id": sid, "kind": s.get("kind"), "product_id": s.get("product_id"), "created": s.get("created")})
+            out.append({**meta, "result": result, "has_weights": has_weights, "status": status, "recordings": recordings,
+                        "epochs_done": len(progress.get("history") or []), "error": progress.get("message") if status == "failed" else None,
+                        "active": active.get("run") == path.name, "activated": active.get("activated") if active.get("run") == path.name else None})
     return out
+
+
+@app.post("/runs/{rid}/delete")
+def delete_run(rid: str, user=Depends(staff)):
+    path = get_run(rid)
+    if (T.read_json(ACTIVE, {}) or {}).get("run") == rid:
+        raise HTTPException(409, "This model is in use. Switch to another model first.")
+    if job_busy() and S.job.get("kind") == "train" and S.job.get("run") == rid:
+        raise HTTPException(409, "This run is still training. Stop it first.")
+    shutil.rmtree(path)
+    return {"ok": True}
 
 
 @app.post("/runs/{rid}/activate")
@@ -450,11 +501,13 @@ def activate(rid: str, user=Depends(staff)):
     if not (path / "best.pt").is_file():
         raise HTTPException(422, "This run has no finished weights")
     ACTIVE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(path / "best.pt", ACTIVE.parent / "active.pt")
+    tmp = ACTIVE.parent / "active.pt.tmp"
+    shutil.copyfile(path / "best.pt", tmp)
+    os.replace(tmp, ACTIVE.parent / "active.pt")  # atomic: the live preview never loads a half-copied file
     result = T.read_json(path / "result.json", {}) or {}
     T.write_json(ACTIVE, {"run": rid, "weights": "models/trained/active.pt", "classes": result.get("classes"),
                           "metrics": result.get("metrics"), "activated": time.time()})
-    return {"ok": True, "note": "Restart the vision service and detector preview to use this model."}
+    return {"ok": True, "note": "The Live camera view switches to this model within a few seconds."}
 
 
 class TestStart(BaseModel):

@@ -1203,3 +1203,12 @@ td.productcell > .pickimg { display: inline-grid; vertical-align: middle; margin
 td.productcell > span { display: inline-block; vertical-align: middle; white-space: normal; }
 .quickreview .evidenceplayer > p.muted { display: none; }
 .quickreview .weightchart { max-height: 90px; }
+
+/* ---------- Training: which model, run and recording is which ---------- */
+.modelinuse { margin-top: 12px; }
+.runstatus { display: inline-block; margin: 3px 0; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #eef1ec; color: var(--muted); }
+.runstatus.running { background: #e3eefc; color: #1f4f9c; }
+.runstatus.finished, .runstatus.stopped-early-model-kept { background: #e7f3ec; color: #1f6b47; }
+.runstatus.stopped-no-model, .runstatus.failed { background: #fbeaea; color: #a33a3a; }
+.tag.inuse { background: var(--green); color: #fff; }
+.tag.inmodel { margin-left: 8px; font-size: 11px; }

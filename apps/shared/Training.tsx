@@ -38,6 +38,8 @@ const FLAG_TEXT: Record<string, string> = {
   jump: "box jumped",
   skipped: "not labelled",
 };
+const stamp = (ts?: number | null) =>
+  ts ? new Date(ts * 1000).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 /** Image behind staff auth, fetched only when scrolled into view. */
@@ -152,6 +154,7 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
     }
     return out;
   }, [sessions]);
+  const inUseRecordings = new Set<string>((runs.find((r) => r.active)?.sessions as string[]) || []);
   const trainable = Object.keys(perProduct).filter((k) => k !== "background" && perProduct[k].frames > 0);
 
   if (offline && !status)
@@ -191,8 +194,19 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 {name.replace(".pt", "")}: {ok ? "ready" : "downloads on first use"}
               </span>
             ))}
-          {status?.active_model && <span className="chip ok">Live model: run {status.active_model.run}</span>}
         </div>
+        {(() => {
+          const inUse = runs.find((r) => r.active);
+          return inUse ? (
+            <div className="result modelinuse">
+              <b>Model in use:</b> trained {stamp(inUse.created)} on {(inUse.classes || []).map(nameOf).join(", ")}
+              {inUse.result && ` · ${(inUse.result.metrics.map50 * 100).toFixed(1)}% mAP50`} · switched on {stamp(inUse.activated)}.{" "}
+              <span className="muted">The Live camera view follows it automatically.</span>
+            </div>
+          ) : (
+            <p className="muted">No trained model in use yet: the Live camera view still uses the earlier pilot detector.</p>
+          );
+        })()}
         {offline && <p className="error">{offline}</p>}
         {error && <p role="alert" className="error">{error}</p>}
       </section>
@@ -263,8 +277,11 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 const labelling = jobRunning && job.kind === "label" && job.session === s.id;
                 return (
                   <tr key={s.id} className={open?.id === s.id ? "selectedrow" : ""}>
-                    <td>{s.kind === "background" ? "Empty tray" : nameOf(s.product_id)}</td>
-                    <td>{new Date(s.created * 1000).toLocaleString()}<br /><small className="muted">{s.duration?.toFixed(0)} s at {s.fps} fps</small></td>
+                    <td>
+                      <b>{s.kind === "background" ? "Empty tray" : nameOf(s.product_id)}</b>
+                      {inUseRecordings.has(s.id) && <small className="tag inmodel">in the model in use</small>}
+                    </td>
+                    <td>{stamp(s.created)}<br /><small className="muted">{s.duration?.toFixed(0)} s at {s.fps} fps</small></td>
                     <td>{s.frame_count}<br /><small className="muted">{s.blurry} blurry</small></td>
                     <td>
                       {labelling ? (
@@ -403,21 +420,43 @@ function TrainProgress({ job, onStop }: { job: any; onStop: (force: boolean) => 
   );
 }
 
+const STATUS_TEXT: Record<string, string> = {
+  running: "training now",
+  finished: "finished",
+  "stopped early": "stopped early, model kept",
+  "stopped, no model": "stopped before the first epoch, no model",
+  failed: "failed",
+};
+
 function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token: string; status: any; busy: boolean; run: (fn: () => Promise<any>) => void; nameOf: (p: string) => string }) {
   const test = status?.test;
   if (runs.length === 0) return null;
   return (
     <section className="panel">
       <h2>4. Trained models</h2>
+      <p className="muted">Newest first. Only one model is in use at a time; switching takes effect in the Live camera view within a few seconds.</p>
       <table>
         <thead>
-          <tr><th>Trained</th><th>Products</th><th>Accuracy (validation)</th><th></th></tr>
+          <tr><th>Trained</th><th>Products and recordings</th><th>Accuracy (validation)</th><th></th></tr>
         </thead>
         <tbody>
           {runs.map((r) => (
-            <tr key={r.id}>
-              <td>{new Date(r.created * 1000).toLocaleString()}<br /><small className="muted">{r.epochs} epochs · {r.device}</small></td>
-              <td>{(r.classes || []).map(nameOf).join(", ")}</td>
+            <tr key={r.id} className={r.active ? "selectedrow" : ""}>
+              <td>
+                <b>{stamp(r.created)}</b>
+                <br />
+                <span className={`runstatus ${r.status.replace(/[^a-z]+/g, "-")}`}>{STATUS_TEXT[r.status] || r.status}</span>
+                <br />
+                <small className="muted">{r.epochs_done}/{r.epochs} epochs</small>
+              </td>
+              <td>
+                {(r.classes || []).map(nameOf).join(", ")}
+                <br />
+                <small className="muted">
+                  {(r.recordings || []).length ? `from ${r.recordings.length} recording${r.recordings.length === 1 ? "" : "s"}: ` : ""}
+                  {(r.recordings || []).map((x: any) => `${x.kind === "background" ? "empty tray" : nameOf(x.product_id)} ${stamp(x.created)}`).join(" · ") || "its recordings were deleted"}
+                </small>
+              </td>
               <td>
                 {r.result ? (
                   <>
@@ -427,28 +466,33 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
                       {Object.entries(r.result.per_class || {}).map(([k, v]: any) => `${nameOf(k)} ${(v.map50 * 100).toFixed(0)}%`).join(" · ")}
                     </small>
                   </>
+                ) : r.status === "failed" ? (
+                  <small className="error">{r.error}</small>
                 ) : (
-                  <span className="muted">{r.has_weights ? "stopped early" : "no result"}</span>
+                  <span className="muted">—</span>
                 )}
               </td>
               <td className="rowactions">
                 {r.active ? (
-                  <span className="tag">in use</span>
+                  <span className="tag inuse">in use since {stamp(r.activated)}</span>
                 ) : (
                   r.has_weights && (
-                    <button className="secondary" disabled={busy}
-                      onClick={() => run(async () => {
-                        const out = await tcall(`/runs/${r.id}/activate`, token, {});
-                        alert(out.note);
-                      })}>
+                    <button className="secondary" disabled={busy} onClick={() => run(() => tcall(`/runs/${r.id}/activate`, token, {}))}>
                       Use this model
                     </button>
                   )
                 )}
                 {r.has_weights && (
-                  <button className="secondary" disabled={busy}
+                  <button className="secondary" disabled={busy && test?.run !== r.id}
                     onClick={() => run(() => (test?.run === r.id ? tcall("/test/stop", token, {}) : tcall("/test/start", token, { run: r.id })))}>
                     {test?.run === r.id ? "Stop test" : "Test live"}
+                  </button>
+                )}
+                {!r.active && r.status !== "running" && (
+                  <button className="iconbutton" aria-label="Delete this training run"
+                    onClick={() => confirm(`Delete the training run from ${stamp(r.created)}? Its recordings are kept.`) &&
+                      run(() => tcall(`/runs/${r.id}/delete`, token, {}))}>
+                    <Trash size={18} />
                   </button>
                 )}
               </td>
@@ -460,7 +504,7 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
         <div className="recordgrid">
           <MjpegView url={T + "/test/stream"} token={token} />
           <div>
-            <h3>Live test</h3>
+            <h3>Live test: model from {stamp(runs.find((r) => r.id === test.run)?.created)}</h3>
             <p className="muted">Hold each product in front of the camera. Nothing here affects carts.</p>
             <p>{test.ms !== null && `${test.ms} ms per frame`}</p>
             {(test.detections || []).length === 0 ? <p>No product detected.</p> : test.detections.map((d: any, i: number) => (
@@ -490,7 +534,7 @@ function SessionEditor({ id, mode, token, job, onMode, onClose, onChanged, onErr
     }
   }, [finished]);
   if (!s) return <section className="panel"><p className="muted">Loading recording…</p></section>;
-  const title = s.kind === "background" ? "Empty tray" : nameOf(s.product_id);
+  const title = `${s.kind === "background" ? "Empty tray" : nameOf(s.product_id)} (recorded ${stamp(s.created)})`;
   return (
     <section className="panel">
       <div className="sectionhead">
