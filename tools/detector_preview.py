@@ -12,6 +12,7 @@ from ultralytics import YOLO
 
 from tools import camera_preview
 from vision.identify import Dinov2Embedder, Gallery
+from vision.verify import Verifier
 
 
 class DetectorPreview(camera_preview.SharedCamera):
@@ -31,6 +32,8 @@ class DetectorPreview(camera_preview.SharedCamera):
         self.follow = os.getenv('SHELFFLOW_DETECTOR', 'trained') != 'gallery'
         self.loaded_mtime = self.trained.stat().st_mtime if products_model and self.trained.is_file() else None
         self.checked = 0.0
+        # Unknown check: detections that do not look like the product the model named show as Unknown.
+        self.verifier = Verifier.for_weights(self.trained, device) if products_model and Path(weights) == self.trained else None
         # Same live references as the vision service (teach, restock, staff labels), so a
         # newly taught product is named here too instead of showing as Unknown.
         self.sync, self.synced = None, 0.0
@@ -73,6 +76,7 @@ class DetectorPreview(camera_preview.SharedCamera):
                     mtime = self.trained.stat().st_mtime if self.trained.is_file() else None
                     if mtime and mtime != self.loaded_mtime:
                         self.model, self.products_model, self.loaded_mtime = YOLO(str(self.trained)), True, mtime
+                        self.verifier = Verifier.for_weights(self.trained, self.device, self.verifier.embedder if self.verifier else None)
                         print('Switched to the trained product model', self.trained, flush=True)
                 except Exception as exc:  # half-written or unreadable: keep the current model, retry next check
                     print('Model reload failed:', type(exc).__name__, flush=True)
@@ -97,6 +101,12 @@ class DetectorPreview(camera_preview.SharedCamera):
             predictions = []
             if crops and self.products_model:
                 labelled = [(b, detected.names[int(d.cls.item())], float(d.conf.item())) for b, d in zip(boxes, detected.boxes)]
+                if self.verifier is not None:
+                    try:
+                        sims = self.verifier.similarities(frame, boxes, [p for _, p, _ in labelled])
+                        labelled = [(b, p if self.verifier.known(p, sim) else None, c) for (b, p, c), sim in zip(labelled, sims)]
+                    except Exception as exc:  # never lose the live view over the check
+                        print('Unknown check failed:', type(exc).__name__, flush=True)
             elif crops:
                 labelled = []
                 for box, vector in zip(boxes, self.embedder.embed(crops)):

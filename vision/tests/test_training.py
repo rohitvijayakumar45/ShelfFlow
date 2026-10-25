@@ -83,6 +83,24 @@ def test_dataset_refuses_unlabelled_or_too_short(tmp_path):
         T.build_dataset([make_session(tmp_path / "s", "y", "product", "oat", 8)], tmp_path / "d2")
 
 
+def test_new_model_keeps_parent_products_and_reads_imported_frames(tmp_path):
+    a = make_session(tmp_path / "s", "a", "product", "sanitizer", 60)
+    parent = T.build_dataset([a], tmp_path / "p")
+    assert parent["classes"] == ["sanitizer"]
+    # Imported multi-product recording with its own split; the sanitizer recording is gone (not chosen).
+    m = make_session(tmp_path / "s", "m", "imported", None, 10)
+    for k, f in enumerate(m.frames):
+        f.update(split="val" if k < 3 else "train", objects=[["vicks", 10, 20, 110, 220], ["oat", 300, 40, 400, 200]])
+    m.save()
+    out = T.build_dataset([m], tmp_path / "c", parent=tmp_path / "p")
+    assert out["classes"] == ["oat", "sanitizer", "vicks"] and out["inherited_frames"] == 60
+    assert out["counts"]["vicks"] == {"train": 7, "val": 3}
+    assert out["counts"]["sanitizer"]["train"] == parent["counts"]["sanitizer"]["train"]
+    rows = (tmp_path / "c/labels/val/m_000000.txt").read_text().split("\n")
+    assert rows[0].split()[0] == "2" and rows[1].split()[0] == "0"
+    assert (tmp_path / "c/labels/train/a_000000.txt").read_text().split()[0] == "1"  # remapped from parent's 0
+
+
 class FakeCamera:
     def __init__(self):
         self.condition = threading.Condition()
@@ -107,6 +125,8 @@ def test_trainer_records_every_frame_and_reviews(tmp_path, monkeypatch):
     from backend.auth import issue
     from tools import trainer
     monkeypatch.setattr(trainer, "SESSIONS", tmp_path / "sessions")
+    monkeypatch.setattr(trainer, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(trainer, "ACTIVE", tmp_path / "active.json")  # never build on (or train from) the real model in use
     camera = FakeCamera()
     trainer.S.camera, trainer.S.source = camera, "fake"
     threading.Thread(target=camera.feed, daemon=True).start()
@@ -141,3 +161,39 @@ def test_trainer_records_every_frame_and_reviews(tmp_path, monkeypatch):
         assert client.get("/sessions", headers=auth).json() == []
     finally:
         camera.stop.set()
+
+
+class ColourEmbedder:
+    """Stand-in for DINOv2: a crop's mean colour, normalised (red crops look alike, blue ones differ)."""
+    name = "test-colour"
+
+    def embed(self, images):
+        v = np.array([img.reshape(-1, 3).mean(0) + 1 for img in images], np.float32)
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def test_unknown_check_flags_objects_unlike_their_product(tmp_path):
+    from vision import verify
+    from vision.detector import Detection
+    ds = tmp_path / "ds"
+    for split in ("train", "val"):
+        (ds / "images" / split).mkdir(parents=True)
+        (ds / "labels" / split).mkdir(parents=True)
+        for k in range(6):
+            image = np.zeros((240, 320, 3), np.uint8)
+            image[60:180, 80:240] = (20, 30, 220 + k)  # red product (BGR)
+            cv2.imwrite(str(ds / "images" / split / f"s_{k:06d}.jpg"), image)
+            (ds / "labels" / split / f"s_{k:06d}.txt").write_text("0 0.5 0.5 0.5 0.5\n")
+    T.write_json(ds / "summary.json", {"classes": ["sanitizer"]})
+    weights = tmp_path / "best.pt"
+    thresholds = verify.build(ds, verify.refs_path(weights), embedder=ColourEmbedder())
+    assert verify.MIN_THRESHOLD <= thresholds["sanitizer"] <= verify.MAX_THRESHOLD
+    v = verify.Verifier.for_weights(weights, embedder=ColourEmbedder())
+    scene = np.zeros((240, 320, 3), np.uint8)
+    scene[20:100, 20:100] = (20, 30, 225)    # looks like the sanitizer
+    scene[120:220, 180:300] = (230, 40, 10)  # blue object the model also called sanitizer
+    found = [Detection("sanitizer", 0.9, (20, 20, 100, 100), 1), Detection("sanitizer", 0.9, (180, 120, 300, 220), 2),
+             Detection("vicks", 0.9, (180, 120, 300, 220), None)]  # no references for vicks: left as is
+    out = verify.TrackCheck(v).apply(scene, found, "tray-a")
+    assert [d.sku for d in out] == ["sanitizer", "UNKNOWN", "vicks"]
+    assert verify.Verifier.for_weights(tmp_path / "other.pt") is None  # no references: no check at all

@@ -23,6 +23,10 @@ async function tcall(path: string, token: string, body?: unknown) {
   return data;
 }
 
+// The two customer bracelets, trained like products so the camera can tell who picked an item up.
+// vision.hands.BAND_MARKERS turns these classes into bracelet identity; they never reach a cart.
+const BANDS: Record<string, string> = { "band-stripe": "Bracelet with stripes", "band-circle": "Bracelet with circles" };
+
 // Same rule as vision/training.py `included`.
 const BOX_FLAGS = ["no_object", "tiny", "huge", "jump", "skipped"];
 function isIncluded(f: any, threshold: number, kind: string) {
@@ -140,10 +144,18 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
   const rec = status?.recording;
   const job = status?.job;
   const jobRunning = job && !["done", "failed", "cancelled"].includes(job.phase);
-  const nameOf = (pid: string) => data.products.find((p: any) => p.id === pid)?.name || pid;
+  const nameOf = (pid: string) => BANDS[pid] || data.products.find((p: any) => p.id === pid)?.name || pid;
   const perProduct = useMemo(() => {
     const out: Record<string, { frames: number; sessions: number; unlabelled: number }> = {};
     for (const s of sessions) {
+      if (s.kind === "imported") {
+        for (const [pid, n] of Object.entries(s.per_product || {}) as [string, number][]) {
+          out[pid] = out[pid] || { frames: 0, sessions: 0, unlabelled: 0 };
+          out[pid].frames += n;
+          out[pid].sessions++;
+        }
+        continue;
+      }
       const key = s.kind === "background" ? "background" : s.product_id;
       out[key] = out[key] || { frames: 0, sessions: 0, unlabelled: 0 };
       if (s.kind === "product" && s.status !== "LABELLED") out[key].unlabelled++;
@@ -154,8 +166,13 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
     }
     return out;
   }, [sessions]);
-  const inUseRecordings = new Set<string>((runs.find((r) => r.active)?.sessions as string[]) || []);
-  const trainable = Object.keys(perProduct).filter((k) => k !== "background" && perProduct[k].frames > 0);
+  const activeRun = runs.find((r) => r.active);
+  const inUseRecordings = new Set<string>((activeRun?.sessions as string[]) || []);
+  // A new model builds on the model in use: it keeps every product that model knows, plus the recordings here.
+  const inherited: string[] = (activeRun?.has_weights && activeRun.classes) || [];
+  const recorded = Object.keys(perProduct).filter((k) => k !== "background" && perProduct[k].frames > 0);
+  const trainable = [...new Set([...inherited, ...recorded])].sort();
+  const adding = recorded.filter((k) => !inherited.includes(k));
 
   if (offline && !status)
     return (
@@ -235,6 +252,7 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 {data.products.map((p: any) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
+                {Object.entries(BANDS).map(([id, name]) => <option key={id} value={id}>{name} (identifies the shopper, never charged)</option>)}
                 <option value="__bg">Empty tray / background (no product)</option>
               </select>
             </label>
@@ -278,10 +296,10 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 return (
                   <tr key={s.id} className={open?.id === s.id ? "selectedrow" : ""}>
                     <td>
-                      <b>{s.kind === "background" ? "Empty tray" : nameOf(s.product_id)}</b>
+                      <b>{s.kind === "background" ? "Empty tray" : s.kind === "imported" ? `Earlier system: ${(s.product_ids || []).map(nameOf).join(", ")}` : nameOf(s.product_id)}</b>
                       {inUseRecordings.has(s.id) && <small className="tag inmodel">in the model in use</small>}
                     </td>
-                    <td>{stamp(s.created)}<br /><small className="muted">{s.duration?.toFixed(0)} s at {s.fps} fps</small></td>
+                    <td>{stamp(s.created)}<br /><small className="muted">{s.duration ? `${s.duration.toFixed(0)} s at ${s.fps} fps` : "imported frames"}</small></td>
                     <td>{s.frame_count}<br /><small className="muted">{s.blurry} blurry</small></td>
                     <td>
                       {labelling ? (
@@ -298,7 +316,7 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                           <Crosshair size={18} /> {s.status === "LABELLED" ? "Re-mark" : "Mark"}
                         </button>
                       )}
-                      {(s.kind === "background" || s.status === "LABELLED") && (
+                      {(s.kind === "background" || (s.kind === "product" && s.status === "LABELLED")) && (
                         <button className="secondary" onClick={() => setOpen({ id: s.id, mode: "review" })}>Review</button>
                       )}
                       <button className="iconbutton" aria-label="Delete recording" disabled={labelling}
@@ -355,17 +373,20 @@ export function TrainProducts({ data, token, initialProduct }: { data: any; toke
                 ))}
               </tbody>
             </table>
+            <p className="muted">
+              {inherited.length
+                ? <>Builds on the model in use, which knows {inherited.map(nameOf).join(", ")}. {adding.length ? <>Adds <b>{adding.map(nameOf).join(", ")}</b>.</> : "No new products; re-trains with the latest recordings."} Products of the model in use are always kept, even if their recordings are deleted.</>
+                : "No model in use yet: this first model learns every product above."}
+            </p>
             {!perProduct.background && (
               <p className="muted"><WarningCircle size={16} /> No empty-tray recording yet: add one to reduce false detections.</p>
             )}
             <div className="actions">
               <label className="inline">
                 Training length
-                <select value={epochs} onChange={(e) => setEpochs(Number(e.target.value))} disabled={!!jobRunning}>
-                  <option value={25}>Quick (25 epochs)</option>
-                  <option value={50}>Standard (50 epochs)</option>
-                  <option value={100}>Thorough (100 epochs)</option>
-                </select>
+                <input type="number" min={1} max={300} step={1} value={epochs} disabled={!!jobRunning} style={{ width: "6em" }}
+                  onChange={(e) => setEpochs(Math.max(1, Math.min(300, Math.round(Number(e.target.value)) || 1)))} />
+                <span className="muted">epochs (1–300)</span>
               </label>
               <button disabled={busy || !!jobRunning || !!rec}
                 onClick={() => run(() => tcall("/train", token, { epochs }))}>
@@ -452,9 +473,19 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
               <td>
                 {(r.classes || []).map(nameOf).join(", ")}
                 <br />
+                {r.parent && (
+                  <small className="muted">
+                    built on the model from {stamp(runs.find((x) => x.id === r.parent)?.created) || r.parent}
+                    {(() => {
+                      const added = (r.classes || []).filter((c: string) => !(r.parent_classes || []).includes(c));
+                      return added.length ? `, added ${added.map(nameOf).join(", ")}` : "";
+                    })()}
+                    <br />
+                  </small>
+                )}
                 <small className="muted">
                   {(r.recordings || []).length ? `from ${r.recordings.length} recording${r.recordings.length === 1 ? "" : "s"}: ` : ""}
-                  {(r.recordings || []).map((x: any) => `${x.kind === "background" ? "empty tray" : nameOf(x.product_id)} ${stamp(x.created)}`).join(" · ") || "its recordings were deleted"}
+                  {(r.recordings || []).map((x: any) => `${x.kind === "background" ? "empty tray" : x.kind === "imported" ? "earlier system" : nameOf(x.product_id)} ${stamp(x.created)}`).join(" · ") || "its recordings were deleted"}
                 </small>
               </td>
               <td>
@@ -474,7 +505,14 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
               </td>
               <td className="rowactions">
                 {r.active ? (
-                  <span className="tag inuse">in use since {stamp(r.activated)}</span>
+                  <>
+                    <span className="tag inuse">in use since {stamp(r.activated)}</span>
+                    <button className="secondary" disabled={busy}
+                      onClick={() => confirm("Stop using this model? The next training starts from scratch (it won't keep this model's products), and you can then delete it.") &&
+                        run(() => tcall(`/runs/${r.id}/deactivate`, token, {}))}>
+                      Stop using
+                    </button>
+                  </>
                 ) : (
                   r.has_weights && (
                     <button className="secondary" disabled={busy} onClick={() => run(() => tcall(`/runs/${r.id}/activate`, token, {}))}>
@@ -508,7 +546,7 @@ function Models({ runs, token, status, busy, run, nameOf }: { runs: any[]; token
             <p className="muted">Hold each product in front of the camera. Nothing here affects carts.</p>
             <p>{test.ms !== null && `${test.ms} ms per frame`}</p>
             {(test.detections || []).length === 0 ? <p>No product detected.</p> : test.detections.map((d: any, i: number) => (
-              <p key={i}><b>{nameOf(d.product)}</b> {(d.confidence * 100).toFixed(0)}%</p>
+              <p key={i}><b>{d.product === "UNKNOWN" ? "Unknown (not a trained product)" : nameOf(d.product)}</b> {(d.confidence * 100).toFixed(0)}%</p>
             ))}
           </div>
         </div>

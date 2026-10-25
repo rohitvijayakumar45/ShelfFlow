@@ -336,25 +336,42 @@ class Train(BaseModel):
     sessions: list[str] | None = None
     epochs: int = Field(default=50, ge=1, le=300)
     imgsz: int | None = Field(default=None, ge=160, le=1280)  # default: the recorded frames' own size
+    parent: str | None = None  # model to build on; default: the model in use. "" = start fresh from COCO YOLO26n
+
+
+def parent_run(requested):
+    """The run a new model builds on: it inherits that run's products (its dataset) and weights."""
+    rid = (T.read_json(ACTIVE, {}) or {}).get("run") if requested is None else requested
+    if not rid:
+        return None
+    path = get_run(rid) if requested else RUNS / rid
+    if not ((path / "best.pt").is_file() and (path / "dataset" / "summary.json").is_file()):
+        if requested:
+            raise HTTPException(422, "That model has no finished weights or dataset to build on")
+        return None
+    return path
 
 
 @app.post("/train")
 def train(body: Train, user=Depends(staff)):
     chosen = [get_session(sid) for sid in body.sessions] if body.sessions else T.sessions(SESSIONS)
+    parent = parent_run(body.parent)
     rid = time.strftime("%Y%m%d-%H%M%S")
     run = RUNS / rid
     try:
-        summary = T.build_dataset(chosen, run / "dataset")
+        summary = T.build_dataset(chosen, run / "dataset", parent=parent / "dataset" if parent else None)
     except ValueError as exc:
         shutil.rmtree(run, ignore_errors=True)
         raise HTTPException(422, str(exc))
     device = T.resolve_device("auto")
     # Train at the camera's real frame size (rounded up to YOLO's stride of 32): upscaling 320x240 frames
     # to 640 only quadruples the work. The model remembers this size and uses it when detecting.
-    longest = max((max(s.meta.get("width") or 0, s.meta.get("height") or 0) for s in chosen), default=640)
+    longest = max((max(s.meta.get("width") or 0, s.meta.get("height") or 0) for s in chosen), default=320 if parent else 640)
     body.imgsz = body.imgsz or min(1280, max(320, -(-longest // 32) * 32))
+    parent_classes = (T.read_json(parent / "dataset" / "summary.json", {}) or {}).get("classes", []) if parent else []
     T.write_json(run / "meta.json", {"id": rid, "created": time.time(), "sessions": [s.id for s in chosen], "epochs": body.epochs,
-                                     "imgsz": body.imgsz, "device": device, **summary})
+                                     "imgsz": body.imgsz, "device": device, "parent": parent.name if parent else None,
+                                     "parent_classes": parent_classes, **summary})
     base = T.MODELS / T.YOLO_BASE
     if base.is_file():
         T._link(base, run / T.YOLO_BASE)  # the AMP check loads ./yolo26n.pt; avoid a second download
@@ -366,6 +383,8 @@ def train(body: Train, user=Depends(staff)):
     cmd = [sys.executable, "-m", "vision.training", "train", "--data", summary["yaml"], "--run-dir", str(run),
            "--epochs", str(body.epochs), "--imgsz", str(body.imgsz), "--device", device,
            "--batch", ("32" if body.imgsz <= 416 else "16") if device.startswith("cuda") else "8", "--workers", "4"]
+    if parent:
+        cmd += ["--weights", str(parent / "best.pt")]
     env = {**os.environ, "PYTHONPATH": str(T.ROOT), "PYTHONUNBUFFERED": "1"}
     log = open(run / "train.log", "w", encoding="utf-8", errors="replace")
     job["proc"] = subprocess.Popen(cmd, cwd=run, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -501,6 +520,17 @@ def activate(rid: str, user=Depends(staff)):
     if not (path / "best.pt").is_file():
         raise HTTPException(422, "This run has no finished weights")
     ACTIVE.parent.mkdir(parents=True, exist_ok=True)
+    # Unknown-check references first, so the live view never pairs the new model with the old references.
+    from vision import verify
+    refs, active_refs = verify.refs_path(path / "best.pt"), verify.refs_path(ACTIVE.parent / "active.pt")
+    try:
+        if not refs.is_file():  # runs trained before the Unknown check existed
+            verify.build(path / "dataset", refs, T.resolve_device("auto"))
+        shutil.copyfile(refs, active_refs.with_name("active-refs.tmp.npz"))
+        os.replace(active_refs.with_name("active-refs.tmp.npz"), active_refs)
+    except Exception as exc:
+        print("Unknown check unavailable for this model:", type(exc).__name__, exc, flush=True)
+        active_refs.unlink(missing_ok=True)
     tmp = ACTIVE.parent / "active.pt.tmp"
     shutil.copyfile(path / "best.pt", tmp)
     os.replace(tmp, ACTIVE.parent / "active.pt")  # atomic: the live preview never loads a half-copied file
@@ -508,6 +538,20 @@ def activate(rid: str, user=Depends(staff)):
     T.write_json(ACTIVE, {"run": rid, "weights": "models/trained/active.pt", "classes": result.get("classes"),
                           "metrics": result.get("metrics"), "activated": time.time()})
     return {"ok": True, "note": "The Live camera view switches to this model within a few seconds."}
+
+
+@app.post("/runs/{rid}/deactivate")
+def deactivate(rid: str, user=Depends(staff)):
+    """Stop using the model in use: the next training starts from scratch and the run can be deleted.
+    The live view keeps the model it has loaded until another one is switched on."""
+    if (T.read_json(ACTIVE, {}) or {}).get("run") != rid:
+        raise HTTPException(409, "This model is not in use")
+    if job_busy():
+        raise HTTPException(409, "Wait for the current job to finish")
+    ACTIVE.unlink(missing_ok=True)
+    (ACTIVE.parent / "active.pt").unlink(missing_ok=True)
+    (ACTIVE.parent / "active-refs.npz").unlink(missing_ok=True)
+    return {"ok": True}
 
 
 class TestStart(BaseModel):
@@ -528,13 +572,15 @@ def test_start(body: TestStart, user=Depends(staff)):
     test_stop(user)
     from ultralytics import YOLO
     model = YOLO(str(weights))
+    from vision.verify import Verifier
+    verifier = Verifier.for_weights(weights, T.resolve_device("auto"))  # None for runs without references: no Unknown check
     stop = threading.Event()
     S.test = {"run": body.run or (T.read_json(ACTIVE, {}) or {}).get("run"), "stop": stop, "ms": None, "detections": []}
-    threading.Thread(target=run_test, args=(model, body.conf, stop, S.test), daemon=True).start()
+    threading.Thread(target=run_test, args=(model, body.conf, stop, S.test, verifier), daemon=True).start()
     return {"ok": True}
 
 
-def run_test(model, conf, stop, test):
+def run_test(model, conf, stop, test, verifier=None):
     import cv2
     import numpy as np
     device = T.resolve_device("auto")
@@ -550,10 +596,17 @@ def run_test(model, conf, stop, test):
         image = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         result = model.predict(image, conf=conf, device=device, verbose=False)[0]
         found = []
-        for box in result.boxes:
+        names = [result.names[int(box.cls.item())] for box in result.boxes]
+        if verifier is not None and names:
+            try:
+                sims = verifier.similarities(image, [tuple(box.xyxy[0].tolist()) for box in result.boxes], names)
+                names = [n if verifier.known(n, sim) else "UNKNOWN" for n, sim in zip(names, sims)]
+            except Exception as exc:  # keep the model's own names
+                print("Unknown check failed:", type(exc).__name__, flush=True)
+        for box, name in zip(result.boxes, names):
             cls, score = int(box.cls.item()), float(box.conf.item())
             x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            name, colour = result.names[cls], colours[cls % len(colours)]
+            colour = (0, 175, 255) if name == "UNKNOWN" else colours[cls % len(colours)]
             cv2.rectangle(image, (x1, y1), (x2, y2), colour, 2)
             label = f"{name} {score:.2f}"
             (tw, th), base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)

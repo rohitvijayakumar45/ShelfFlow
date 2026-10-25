@@ -41,6 +41,7 @@ def run(args):
     config=json.loads(Path(args.config).read_text())
     capture=Capture(args.camera,args.camera_key,args.mode,transport=args.transport,stream_url=getattr(args,'stream_url',None))
     identifier=None
+    unknown_check=None
     models={'pipeline':'vision.run/2'}  # model registry: stamped on every interaction event
     if args.item_weights:
         # Open-set path: one-class item detector per tray + gallery identification (no retraining for new products).
@@ -58,6 +59,13 @@ def run(args):
         sku_map={int(k):v for k,v in config['sku_map'].items()} if config.get('sku_map') else None
         detectors={tray: YoloDetector(args.weights,sku_map,args.device) if args.weights else UnavailableDetector() for tray in config['trays']}
         if args.weights:models['detector']=file_version(args.weights)
+        if args.weights:
+            # Unknown check for Train-products models: detections unlike their product's reference crops become UNKNOWN.
+            from vision.verify import Verifier, TrackCheck, refs_path
+            verifier=Verifier.for_weights(args.weights,args.device)
+            if verifier:
+                unknown_check=TrackCheck(verifier);models['unknown_check']=file_version(refs_path(args.weights))
+                print('Unknown check on:',verifier.thresholds,flush=True)
     # Hands: from the detector's "hand" class when trained with one, else MediaPipe if installed, else none.
     hand_finder=None
     if args.hands!='off' and not any(getattr(d,'has_hands',False) for d in detectors.values()):
@@ -96,7 +104,9 @@ def run(args):
     # starts pre_seconds in the past also sees the hand that reached in before the scale noticed.
     observations={tray:deque(maxlen=120) for tray in config['trays']}
     track_matches={}  # (tray, track id) -> last gallery Match, for weight-driven candidates
-    from vision.hands import MotionProof, annotate
+    from vision.hands import MotionProof, annotate, split_bands, band_evidence, BAND_MARKERS
+    band_markers={**BAND_MARKERS,**config.get('band_markers',{})}  # band class -> marker ID staff give that bracelet
+    sensor_overflow={}  # device -> historical queue-overflow count last seen (the controller only ever counts up)
     def sensor_files():
         seen=set()
         while not sensor_stop.wait(.1):
@@ -206,17 +216,25 @@ def run(args):
                     moving=tray in previous and np.mean(cv2.absdiff(gray,previous[tray]))>settings.get('motion_threshold',8)
                     previous[tray]=gray
                     detections=detectors[tray].detect(crop)
+                    # Bracelet bands (Train-products classes) identify the shopper; they are never products.
+                    detections,bands=split_bands(detections,band_markers)
+                    band_markers_seen,band_hands=band_evidence(bands,(x1,y1),band_markers,config.get('band_hand_reach',3.0))
+                    if unknown_check and detections:
+                        try:detections=unknown_check.apply(crop,detections,tray)
+                        except Exception as exc:print('Unknown check failed:',type(exc).__name__,flush=True)  # keep YOLO's names
                     if identifier and detections:
                         if learning:current_tray[0]=tray
                         detections=identifier.label(crop,detections,active[tray]['id'] if tray in active else 'idle')
                     frame_detections[tray]=detections
                     hands=list(getattr(detectors[tray],'last_hands',[]) or [])
                     if not hands and hand_finder and (tray in active or moving):hands=hand_finder.detect(crop)  # MediaPipe only when something happens
-                    hands=[to_frame(h,(x1,y1)) for h in hands]
+                    hands=[to_frame(h,(x1,y1)) for h in hands]+band_hands
+                    tray_markers=markers+band_markers_seen
+                    annotations['markers']+=[{'id':m['id'],'corners':[[round(v,1) for v in p] for p in m['corners']]} for m in band_markers_seen]
                     items=[(d.track_id,tuple(to_frame(d.box,(x1,y1)))) for d in detections]
                     for d in detections:
                         if d.match is not None and d.track_id is not None:track_matches[(tray,d.track_id)]=d.match
-                    observed=(time.monotonic(),items,hands,markers,f"{frame.boot_id}-{frame.sequence}")
+                    observed=(time.monotonic(),items,hands,tray_markers,f"{frame.boot_id}-{frame.sequence}")
                     observations[tray].append(observed)
                     if tray in active:active[tray]['proof'].observe(*observed)
                     annotations['trays'][tray]={'roi':[x1,y1,x2,y2],'hands':hands,'items':[{'box':list(b),'track':t,'sku':d.sku,
@@ -225,7 +243,7 @@ def run(args):
                     product_history[tray].append((time.monotonic(),[d.sku for d in detections]))
                     if moving and not config.get('weight_driven'):trigger(tray,'MOTION')
                     if tray in active and detections:
-                        active[tray]['candidates']=associations.observe(detections,markers,active[tray]['id'])
+                        active[tray]['candidates']=associations.observe(detections,tray_markers,active[tray]['id'])
                 frame.annotations=annotations  # kept with the evidence frame for the review player
             except Exception as exc:
                 camera_failed=True
@@ -233,12 +251,18 @@ def run(args):
             with lock:
                 incoming=list(raw_events);raw_events.clear()
             for event in incoming:
+                prior=sensor_overflow.get(event.device_id)
+                sensor_overflow[event.device_id]=max(prior or 0,event.sensor_health.queue_overflow)
                 if event.tray_id not in config['trays']:continue
                 if event.event_type=='RFID':
                     for ref in event.evidence_refs:
                         if ref.startswith('RFID:'):rfid_reads.append((time.monotonic(),ref[5:]))
                     if not config.get('weight_driven'):trigger(event.tray_id,'RFID')
                 elif event.event_type=='WEIGHT' and event.weight and abs(event.weight.post_g-event.weight.pre_g)>=config['trays'][event.tray_id].get('hysteresis_g',8):
+                    new_loss=prior is not None and event.sensor_health.queue_overflow>prior
+                    event=event.model_copy(update={'sensor_health':event.sensor_health.model_copy(update={
+                        'ok':not event.sensor_health.flags and not new_loss,
+                        'flags':list(event.sensor_health.flags)+(['SENSOR_QUEUE_LOST_EVENTS'] if new_loss else [])})})
                     if config.get('weight_driven'):
                         try:
                             response=api.get('/devices/vision-1/config');response.raise_for_status()

@@ -133,6 +133,42 @@ def manual_assign(session_id, bracelet_id, actual_uid, physical_confirmed, reaso
             gate.state, gate.detail = "ASSIGNED", "MANUAL_RECOVERY"
         audit(db, actor, "MANUAL_ASSIGN", {"session_id": session_id, "bracelet_id": b.id, "reason": reason})
 
+def _entry_session(db, token):
+    qr = db.get(EntryToken, hashlib.sha256(token.encode()).hexdigest())
+    if not qr:
+        fail("Unknown entry QR", 404)
+    session = get(db, ShoppingSession, qr.session_id)
+    if qr.used or qr.expires < time.time() or session.status != "ENTRY":
+        fail("Entry QR already used or expired: ask the customer to generate a new one")
+    return qr, session
+
+def check_in_preview(token):
+    """Who is this QR? Read-only, so staff can check before handing over a bracelet."""
+    with transaction() as db:
+        qr, session = _entry_session(db, token)
+        return {"session_id": session.id, "customer_alias": db.get(Customer, session.customer_id).alias, "expires_in": round(qr.expires - time.time())}
+
+def check_in(token, actual_uid, actor):
+    """Staff scanned the customer's entry QR and the bracelet they hand over was tapped on a reader:
+    consume the QR, bind that bracelet (RFID + pattern markers) to the visit and activate the cart."""
+    with transaction() as db:
+        qr, session = _entry_session(db, token)
+        b = db.scalar(select(Bracelet).where(Bracelet.rfid == actual_uid))
+        if not b:
+            fail("This tag is not a registered bracelet: register it under Bracelet inventory first")
+        if b.session_id or b.state != "AVAILABLE" or not b.clean:
+            fail(f"Bracelet {b.id} is not free ({b.state.lower()}): confirm its cleaned return first")
+        if not b.markers:
+            fail(f"Bracelet {b.id} has no pattern set, so the camera could not tell who picked an item")
+        if db.scalar(select(Bracelet).where(Bracelet.session_id == session.id)):
+            fail("This visit already has a bracelet")
+        qr.used = True
+        b.state, b.session_id, session.status = "ASSIGNED", session.id, "ACTIVE"
+        db.add(BraceletBinding(bracelet_id=b.id, session_id=session.id, rfid=b.rfid, markers=list(b.markers)))
+        audit(db, actor, "CHECK_IN", {"session_id": session.id, "bracelet_id": b.id, "rfid": b.rfid, "markers": list(b.markers)})
+        emit(db, f"cart/{session.id}", {"version": session.cart_version, "status": session.status})
+        return {"session_id": session.id, "bracelet_id": b.id, "markers": list(b.markers)}
+
 def cart(db, session_id):
     s = get(db, ShoppingSession, session_id)
     items = []
@@ -151,7 +187,7 @@ def cart(db, session_id):
     return {"session_id": s.id, "status": s.status, "version": s.cart_version, "items": items,
             "total_minor": sum(i["quantity"] * i["price_minor"] for i in items), "currency": "INR",
             "pending": [{"id": h.id, "tray_id": h.tray_id, "reasons": h.reason, "status": h.status} for h in pending],
-            "bracelet": {"id": bracelet.id, "state": bracelet.state} if bracelet else None,
+            "bracelet": {"id": bracelet.id, "state": bracelet.state, "markers": list(bracelet.markers)} if bracelet else None,
             "receipt": receipt.content if receipt else None, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED,
             "confirmed_events": [{"id":h.id,"action":h.proposal.get("action"),"product_id":h.proposal.get("product_id"),"quantity":h.proposal.get("quantity"),
                                   "name":(db.get(Product,h.proposal.get("product_id")).name if h.proposal.get("product_id") and db.get(Product,h.proposal.get("product_id")) else h.proposal.get("product_id")),
@@ -214,6 +250,19 @@ def source_vetoes(db,event_id,tray_id):
         if claim and claim.interaction_event_id!=event_id:
             reasons.append('SENSOR_EVIDENCE_ALREADY_CONSUMED')
     return reasons,sources
+
+AUTO_WINDOW_S = 20  # a collection window lasts at most this long before the camera event is sent
+
+def timely_weight_source(db, event):
+    """Strict auto-add precondition: a camera event citing exactly one shelf WEIGHT event that the laptop
+    received during the camera's collection window. Content/tray/single-use checks are source_vetoes'."""
+    refs = [ref[13:] for ref in event.evidence_refs if ref.startswith("SENSOR_EVENT:")]
+    if event.device_id != "vision-1" or len(refs) != 1:
+        return False
+    source = db.get(SensorEvent, refs[0])
+    if not source or source.device_id == event.device_id or source.payload.get("event_type") != "WEIGHT":
+        return False
+    return event.capture_end - AUTO_WINDOW_S <= source.received <= event.capture_end + 2
 
 def claim_sources(db,event_id,tray_id):
     reasons,sources=source_vetoes(db,event_id,tray_id)
@@ -344,8 +393,13 @@ def ingest(event: DeviceEvent):
             if tray.calibration_version != event.calibration_version:
                 veto.append("CALIBRATION_MISMATCH")
             if MODE != "simulation":
-                # Real chain extraction is intentionally review-first until physical validation.
-                veto.append("PHYSICAL_OWNERSHIP_NOT_VALIDATED")
+                if settings.AUTO_ADD and timely_weight_source(db, event):
+                    # The shelf clock is only second-accurate; the laptop receive time of the referenced
+                    # weight event stands in for it. Every other fusion veto still applies.
+                    veto = [v for v in veto if v != "CLOCK_UNCERTAINTY"]
+                else:
+                    # Real chain extraction is review-first unless strict auto-add is switched on.
+                    veto.append("PHYSICAL_OWNERSHIP_NOT_VALIDATED")
             # Validate the whole group before applying any member, including same-owner net returns.
             net_by_session = {}
             total_delta = 0
@@ -408,6 +462,11 @@ def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
             h.status = "DISMISSED"
         db.add(ReviewDecision(hypothesis_id=h.id, actor=actor, decision={"decision": decision, "session_id": session_id, "quantity": quantity, "reason": reason, "unit_ids": unit_ids}))
         audit(db, actor, "REVIEW", {"hypothesis_id": h.id, "decision": decision, "reason": reason})
+
+def staff_exit(session_id, actor):
+    """Staff check the customer out at the exit. One payment key per visit, so pressing it again (or a
+    repeated exit event) returns the original bill instead of making a second one."""
+    return checkout(session_id, f"exit-{session_id}", "SUCCESS", True, "Checked out by staff at the exit", actor)
 
 def checkout(session_id, key, outcome, assisted, reason, actor):
     with transaction() as db:

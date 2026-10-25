@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 MODE = os.getenv("SHELFFLOW_MODE", "simulation")
 WEIGHTS_ENABLED = os.getenv("WEIGHTS_ENABLED", "true").lower() not in ("false", "0", "no")
+# Hardware mode: a camera interaction backed by an on-time shelf weight event may update the cart
+# without staff review when every fusion check passes. Off: every physical interaction is reviewed.
+AUTO_ADD = os.getenv("AUTO_ADD", "false").lower() in ("true", "1", "yes")
 if MODE not in ('simulation','hardware'):
     raise RuntimeError('SHELFFLOW_MODE must be simulation or hardware')
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./shelfflow.db")

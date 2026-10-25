@@ -169,3 +169,32 @@ def movement_candidates(summary, matches, clip_id, min_contact=1):
                              hand_track="UNPROVEN", action="PICKUP" if t["exited"] else "RETURN", quantity=1,
                              sku=known, detector_confidence=0.0, **scores(match)))
     return annotate(out, summary, out[0].action) if out else out
+
+# ---------------------------------------------------------------------------
+# Bracelet bands as identity. A Train-products model may also know the two bracelet
+# patterns (classes "band-stripe", "band-circle"). A band says WHO, never WHAT: it leaves
+# the product list and becomes a bracelet marker (the same IDs staff give the bracelet in
+# Shelf setup, so the existing marker -> bracelet -> session mapping applies), and the
+# area around it stands in for that wrist's hand when the model has no hand class.
+# ---------------------------------------------------------------------------
+BAND_MARKERS = {"band-stripe": 200, "band-circle": 201}
+
+
+def split_bands(detections, band_markers=None):
+    """(products, bands) from one frame's detections."""
+    band_markers = BAND_MARKERS if band_markers is None else band_markers
+    products, bands = [], []
+    for d in detections:
+        (bands if d.sku in band_markers else products).append(d)
+    return products, bands
+
+
+def band_evidence(bands, origin, band_markers=None, reach=3.0):
+    """Bracelet markers (full-frame corners) and hand regions for the bands seen in a tray crop."""
+    band_markers = BAND_MARKERS if band_markers is None else band_markers
+    markers, hands = [], []
+    for d in bands:
+        x1, y1, x2, y2 = offset(d.box, origin)
+        markers.append({"id": band_markers[d.sku], "corners": [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]})
+        hands.append(expand((x1, y1, x2, y2), reach))
+    return markers, hands

@@ -442,6 +442,18 @@ def order_reconcile(body: Reconcile, user=Depends(staff)):
 def assisted_payment(body: AssistedPayment, user=Depends(staff)):
     return svc.checkout(body.session_id,body.idempotency_key,body.outcome,True,body.reason,"staff")
 
+class StaffExit(StrictModel):
+    session_id: str = Field(min_length=1, max_length=64)
+
+@app.get("/staff/visits/{session_id}")
+def visit(session_id: str, user=Depends(staff)):
+    with SessionLocal() as db:
+        return svc.cart(db, session_id)
+
+@app.post("/staff/exit")
+def staff_exit(body: StaffExit, user=Depends(staff)):
+    return svc.staff_exit(body.session_id, "staff")
+
 @app.post("/staff/gate-reset")
 def gate_reset(body: Reason, user=Depends(staff)):
     with svc.transaction() as db:
@@ -606,6 +618,20 @@ class Manual(Reason):
     bracelet_id: str
     actual_uid: str
     physical_confirmed: bool
+
+class CheckInToken(StrictModel):
+    token: str = Field(min_length=10, max_length=200)
+
+class CheckIn(CheckInToken):
+    actual_uid: str = Field(pattern=r'^(?:[0-9A-F]{8}|[0-9A-F]{14}|[0-9A-F]{20})$')
+
+@app.post("/staff/check-in/preview")
+def check_in_preview(body: CheckInToken, user=Depends(staff)):
+    return svc.check_in_preview(body.token)
+
+@app.post("/staff/check-in")
+def check_in(body: CheckIn, user=Depends(staff)):
+    return svc.check_in(body.token, body.actual_uid, user["sub"])
 
 @app.post("/staff/manual-assignment")
 def manual(body: Manual, user=Depends(staff)):

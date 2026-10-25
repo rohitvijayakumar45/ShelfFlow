@@ -4,8 +4,10 @@ One recording session holds the raw JPEG frames of one clip (original camera byt
 re-encoded) plus frames.json with, per frame, its sharpness, SAM box and review flags.
 A product session's object is marked once (a click or a box on any frame); SAM 2.1 tracks
 it forwards and backwards through the clip. Background sessions (empty tray) become
-negative images. Training builds a YOLO dataset from all included frames and fine-tunes
-COCO-pretrained YOLO26n with one class per product.
+negative images. Imported sessions hold frames from the earlier system with several labelled
+products each. Training builds a YOLO dataset from all included frames plus the frames of the
+model it builds on (its parent), so each new model knows every product trained before it, and
+fine-tunes from the parent's weights (or COCO-pretrained YOLO26n) with one class per product.
 
 `python -m vision.training train ...` is the training subprocess started by tools.trainer;
 it reports progress to progress.json and stops cleanly between batches when STOP exists.
@@ -143,9 +145,14 @@ class Session:
     def summary(self):
         threshold = self.threshold()
         blurry = sum(1 for f in self.frames if f.get("sharp", 0) < threshold)
+        used = self.included()
+        per_product = {}
+        for f in used:
+            for pid in {pid for pid, _ in frame_objects(self, f)}:
+                per_product[pid] = per_product.get(pid, 0) + 1
         return {**self.meta, "id": self.id, "frame_count": len(self.frames), "blurry": blurry,
                 "flagged": sum(1 for f in self.frames if any(x in BOX_FLAGS for x in f.get("flags", []))),
-                "included": len(self.included()), "threshold": threshold,
+                "included": len(used), "per_product": per_product, "threshold": threshold,
                 "auto_threshold": auto_blur_threshold([f.get("sharp") for f in self.frames])}
 
 
@@ -249,12 +256,44 @@ def _link(src, dst):
         shutil.copyfile(src, dst)
 
 
-def build_dataset(chosen, out, max_per_session=250):
+def frame_objects(session, frame):
+    """(product_id, [x1, y1, x2, y2]) pairs in a frame: the one SAM box of a product recording, or the
+    several hand-checked boxes of an imported multi-product frame (kind "imported")."""
+    kind = session.meta.get("kind", "product")
+    if kind == "imported":
+        return [(o[0], o[1:]) for o in frame.get("objects", [])]
+    if kind == "product" and frame.get("box"):
+        return [(session.meta["product_id"], frame["box"])]
+    return []
+
+
+def _inherited(parent, skip):
+    """Frames of the parent model's dataset whose recordings are not part of this run (deleted, or not
+    chosen), as (name, split, image, [(product_id, "cx cy w h")]). A new model therefore always knows
+    every product its parent knew, even after the parent's recordings are gone."""
+    parent = Path(parent)
+    names = read_json(parent / "summary.json", {}).get("classes") or []
+    out = []
+    for split in ("train", "val"):
+        for label in sorted((parent / "labels" / split).glob("*.txt")):
+            image = parent / "images" / split / f"{label.stem}.jpg"
+            if label.stem.rsplit("_", 1)[0] in skip or not image.is_file():
+                continue
+            rows = [r.split(maxsplit=1) for r in label.read_text(encoding="ascii").splitlines() if r.strip()]
+            out.append((label.stem, split, image, [(names[int(c)], rest) for c, rest in rows]))
+    return out
+
+
+def build_dataset(chosen, out, max_per_session=250, parent=None):
     """YOLO dataset from included frames. Split by ~1 s chunks so near-identical neighbours never
-    straddle train/val. Long clips are thinned evenly to max_per_session frames."""
+    straddle train/val. Long clips are thinned evenly to max_per_session frames.
+    parent: the dataset folder of the model this one builds on; its frames from recordings not in
+    `chosen` are carried over, so the new model = everything the parent knew + the new recordings."""
     out = Path(out)
-    product_sessions = [s for s in chosen if s.meta.get("kind", "product") == "product" and s.meta.get("status") == "LABELLED"]
-    classes = sorted({s.meta["product_id"] for s in product_sessions if s.included()})
+    usable = [s for s in chosen if s.meta.get("kind", "product") == "background" or s.meta.get("status") == "LABELLED"]
+    inherited = _inherited(parent, {s.id for s in chosen}) if parent else []
+    classes = sorted({pid for s in usable for f in s.included() for pid, _ in frame_objects(s, f)}
+                     | {pid for *_, rows in inherited for pid, _ in rows})
     if not classes:
         raise ValueError("No labelled product frames are included yet")
     index = {pid: k for k, pid in enumerate(classes)}
@@ -263,10 +302,14 @@ def build_dataset(chosen, out, max_per_session=250):
         (out / "labels" / split).mkdir(parents=True, exist_ok=True)
     counts = {pid: {"train": 0, "val": 0} for pid in classes}
     counts["background"] = {"train": 0, "val": 0}
-    for s in chosen:
-        kind = s.meta.get("kind", "product")
-        if kind == "product" and (s.meta.get("status") != "LABELLED" or s.meta.get("product_id") not in index):
-            continue
+
+    def add(name, split, image, lines, keys):
+        _link(image, out / "images" / split / f"{name}.jpg")
+        (out / "labels" / split / f"{name}.txt").write_text("".join(lines), encoding="ascii")
+        for key in keys or ["background"]:
+            counts[key][split] += 1
+
+    for s in usable:
         frames = s.included()
         if len(frames) > max_per_session:
             step = len(frames) / max_per_session
@@ -276,25 +319,23 @@ def build_dataset(chosen, out, max_per_session=250):
         if not val_chunks and len(chunks) > 1:
             val_chunks = {chunks[-1]}
         w, h = s.meta["width"], s.meta["height"]
-        key = "background" if kind == "background" else s.meta["product_id"]
         for f in frames:
-            split = "val" if f["i"] // CHUNK in val_chunks else "train"
-            name = f"{s.id}_{f['i']:06d}"
-            _link(s.frame_path(f["i"]), out / "images" / split / f"{name}.jpg")
-            line = ""
-            if kind == "product":
-                x1, y1, x2, y2 = f["box"]
+            split = f.get("split") or ("val" if f["i"] // CHUNK in val_chunks else "train")  # imported frames keep their split
+            lines, keys = [], []
+            for pid, (x1, y1, x2, y2) in frame_objects(s, f):
                 x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
-                line = f"{index[key]} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f}\n"
-            (out / "labels" / split / f"{name}.txt").write_text(line, encoding="ascii")
-            counts[key][split] += 1
+                lines.append(f"{index[pid]} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f}\n")
+                keys.append(pid)
+            add(f"{s.id}_{f['i']:06d}", split, s.frame_path(f["i"]), lines, sorted(set(keys)))
+    for name, split, image, rows in inherited:
+        add(name, split, image, [f"{index[pid]} {rest}\n" for pid, rest in rows], sorted({pid for pid, _ in rows}))
     missing = [pid for pid in classes if counts[pid]["val"] == 0 or counts[pid]["train"] == 0]
     if missing:
         raise ValueError(f"Too few usable frames to split train/validation for: {', '.join(missing)}. Record a longer clip.")
     names = "\n".join(f"  {k}: {pid}" for k, pid in enumerate(classes))
     (out / "data.yaml").write_text(f"path: {out.as_posix()}\ntrain: images/train\nval: images/val\nnames:\n{names}\n", encoding="utf-8")
-    write_json(out / "summary.json", {"classes": classes, "counts": counts})
-    return {"classes": classes, "counts": counts, "yaml": str(out / "data.yaml")}
+    write_json(out / "summary.json", {"classes": classes, "counts": counts, "inherited_frames": len(inherited)})
+    return {"classes": classes, "counts": counts, "inherited_frames": len(inherited), "yaml": str(out / "data.yaml")}
 
 
 # ---------------- Training subprocess ----------------
@@ -324,7 +365,9 @@ def train_main(a):
         from ultralytics import YOLO
         import torch
         MODELS.mkdir(parents=True, exist_ok=True)
-        model = YOLO(str(MODELS / YOLO_BASE))  # COCO-pretrained YOLO26n; downloaded once into models/
+        # Start from the parent model's weights when there is one (it already knows the older products, so the
+        # new run converges faster); its class head is rebuilt for the new product list. Else COCO-pretrained YOLO26n.
+        model = YOLO(a.weights or str(MODELS / YOLO_BASE))
         report(True, phase="preparing", message="Checking dataset and caching images")
 
         def epoch_start(trainer):
@@ -367,6 +410,12 @@ def train_main(a):
         if not best.is_file():
             raise RuntimeError("Training produced no weights")
         shutil.copyfile(best, run / "best.pt")
+        report(True, phase="finishing", message="Building reference crops for the Unknown check")
+        try:
+            from vision import verify
+            verify.build(Path(a.data).parent, verify.refs_path(run / "best.pt"), a.device)
+        except Exception as exc:  # the model still works, just without the Unknown check
+            print("Unknown-check references not built:", type(exc).__name__, exc, flush=True)
         validator = trainer.validator
         per_class = {}
         if validator is not None and getattr(validator, "metrics", None) is not None:
@@ -398,6 +447,7 @@ def main():
     t.add_argument("--batch", type=int, default=16)
     t.add_argument("--workers", type=int, default=4)
     t.add_argument("--device", default="auto")
+    t.add_argument("--weights", default=None, help="parent model to continue from (default: COCO yolo26n.pt)")
     a = parser.parse_args()
     a.device = resolve_device(a.device)
     train_main(a)

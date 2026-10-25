@@ -19,3 +19,6 @@ reports/*.xml
 npm-debug.log*
 .platformio-core/
 data/logs/
+
+# Local copies of secret files for handoffs: never commit
+/handoff-secrets/

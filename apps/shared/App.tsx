@@ -752,34 +752,15 @@ function ShoppersPage({ data, token, action }: { data: any; token: string; actio
       <Tabs tabs={[["entry", "Check-in & bracelets"], ["visits", "Visits & checkout"], ["accounts", "Accounts & receipts"]]} value={tab} onChange={setTab} />
       {tab === "entry" && (
         <>
-                  <Gate token={token} data={data} action={action} />
+                  <CheckIn data={data} action={action} />
                   <section className="panel">
                     <h2>Bracelet inventory</h2>
-                    <details>
-                      <summary>Register a physical bracelet</summary>
-                      <JsonForm
-                        label="Bracelet registration"
-                        initial={{
-                          bracelet_id: "",
-                          rfid: "",
-                          markers: [],
-                          cleaned: false,
-                          reason: "",
-                        }}
-                        onSubmit={(body) => {
-                          const { bracelet_id, ...setup } = body;
-                          return action(
-                            `/staff/bracelets/${encodeURIComponent(bracelet_id)}/setup`,
-                            setup,
-                          );
-                        }}
-                      />
-                    </details>
+                    <BraceletRegister data={data} action={action} />
                     <table>
                       <thead>
                         <tr>
                           <th>Bracelet</th>
-                          <th>UID / markers</th>
+                          <th>Tag / pattern</th>
                           <th>State</th>
                           <th>Reuse</th>
                         </tr>
@@ -791,9 +772,9 @@ function ShoppersPage({ data, token, action }: { data: any; token: string; actio
                             <td>
                               {b.rfid}
                               <br />
-                              <small>{b.markers.join(", ")}</small>
+                              <small>{patternOf(b.markers)}</small>
                             </td>
-                            <td>{b.state}</td>
+                            <td>{b.state}{b.session_id && <><br /><small>{data.sessions.find((x: any) => x.id === b.session_id)?.customer_alias || b.session_id.slice(0, 8)}</small></>}</td>
                             <td>
                               <button
                                 className="secondary"
@@ -816,6 +797,10 @@ function ShoppersPage({ data, token, action }: { data: any; token: string; actio
                       </tbody>
                     </table>
                   </section>
+                  <details className="panel">
+                    <summary>Bracelet dispenser (simulated gate) and older manual assignment</summary>
+                    <Gate token={token} data={data} action={action} />
+                  </details>
         </>
       )}
       {tab === "visits" && (
@@ -1109,6 +1094,106 @@ function Gate({ data, action }: { token: string; data: any; action: Action }) {
     </section>
   );
 }
+// Bracelet patterns the camera model knows (classes band-stripe / band-circle). They are stored as the
+// bracelet's marker ID, so the camera's band detection maps to the bracelet like a printed marker does.
+const PATTERNS: Record<number, string> = { 200: "Stripes", 201: "Circles" };
+const patternOf = (markers: number[] = []) => markers.map((m) => PATTERNS[m] || `marker ${m}`).join(", ") || "no pattern set";
+
+/** Entry: scan the customer's QR, tap the bracelet you hand over on a shelf reader, assign. */
+function CheckIn({ data, action }: { data: any; action: Action }) {
+  const [token, setToken] = useState(""),
+    [who, setWho] = useState<any>(null),
+    [since, setSince] = useState(0),
+    [scanning, setScanning] = useState(false),
+    [error, setError] = useState(""),
+    [done, setDone] = useState<any>(null);
+  const video = useRef<HTMLVideoElement>(null);
+  const controls = useRef<IScannerControls | null>(null);
+  useEffect(() => () => controls.current?.stop(), []);
+  const tap = since > 0 ? data.recent_taps?.find((t: any) => t.captured >= since) : null;
+  const bracelet = tap && data.bracelets.find((b: any) => b.rfid === tap.uid);
+  async function identify(value: string) {
+    setToken(value); setWho(null); setDone(null); setError("");
+    try {
+      setWho(await action("/staff/check-in/preview", { token: value }));
+      setSince(Date.now() / 1000);
+    } catch (e: any) { setError(String(e.message || e)); }
+  }
+  async function scan() {
+    setScanning(true); setError("");
+    try {
+      controls.current = await new (await import("@zxing/browser")).BrowserQRCodeReader().decodeFromVideoDevice(undefined, video.current!, (r) => {
+        if (r) { controls.current?.stop(); setScanning(false); identify(r.getText()); }
+      });
+    } catch (e) { setError(String(e)); setScanning(false); }
+  }
+  return (
+    <section className="panel">
+      <h2>Check in a customer</h2>
+      <ol className="steps">
+        <li><b>Scan</b> the entry QR on the customer's phone.</li>
+        <li><b>Tap</b> the bracelet you are handing over on a shelf RFID reader.</li>
+        <li><b>Assign</b>: the visit starts and the customer's cart turns on.</li>
+      </ol>
+      <video ref={video} className="scanner" muted playsInline />
+      <div className="actions">
+        <button className="secondary" onClick={scan} disabled={scanning}>Start QR scanner</button>
+        <button className="secondary" onClick={() => { controls.current?.stop(); setScanning(false); }}>Stop camera</button>
+      </div>
+      <form onSubmit={(e) => { e.preventDefault(); identify(token.trim()); }}>
+        <label>Entry QR (scanned, or paste the code)<input value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" /></label>
+        <button className="secondary" disabled={token.trim().length < 10}>Look up customer</button>
+      </form>
+      {error && <p className="error">{error}</p>}
+      {who && !done && (
+        <div className="result">
+          <p>Customer: <b>{who.customer_alias || "Shopper"}</b> · QR valid for {who.expires_in} s more.</p>
+          {!tap ? <p>Now tap the bracelet on a shelf reader…</p> : !bracelet ? (
+            <p className="error">Tag {tap.uid} is not a registered bracelet. Register it below first.</p>
+          ) : (
+            <>
+              <p>Bracelet <b>{bracelet.id}</b> · pattern <b>{patternOf(bracelet.markers)}</b> · tag {bracelet.rfid} · {bracelet.state.toLowerCase()}</p>
+              <button onClick={() => action("/staff/check-in", { token: token.trim(), actual_uid: bracelet.rfid })
+                .then((r) => { setDone(r); setWho(null); setToken(""); }).catch((e: any) => setError(String(e.message || e)))}>
+                Assign {bracelet.id} and start visit
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {done && <Notice>Visit started: bracelet {done.bracelet_id} ({patternOf(done.markers)}). The customer's cart is now active.</Notice>}
+    </section>
+  );
+}
+
+/** Register or relabel a physical bracelet: its RFID tag and the pattern printed on it. */
+function BraceletRegister({ data, action }: { data: any; action: Action }) {
+  const [id, setId] = useState(""), [uid, setUid] = useState(""), [pattern, setPattern] = useState(""), [cleaned, setCleaned] = useState(true);
+  const latest = data.recent_taps?.find((t: any) => Date.now() / 1000 - t.captured < 60);
+  const taken = data.bracelets.find((b: any) => b.id !== id && pattern && b.markers.includes(Number(pattern)));
+  return (
+    <details>
+      <summary>Register or relabel a bracelet</summary>
+      <label>Bracelet name (e.g. B02)<input value={id} onChange={(e) => setId(e.target.value.toUpperCase())} /></label>
+      <label>RFID tag UID<input value={uid} onChange={(e) => setUid(e.target.value.toUpperCase())} /></label>
+      <button className="secondary" disabled={!latest} onClick={() => setUid(latest.uid)}>Use latest tap{latest ? ` (${latest.uid})` : ""}</button>
+      <label>Pattern on the bracelet
+        <select value={pattern} onChange={(e) => setPattern(e.target.value)}>
+          <option value="">Choose…</option>
+          {Object.entries(PATTERNS).map(([m, name]) => <option key={m} value={m}>{name}</option>)}
+        </select>
+      </label>
+      {taken && <p className="error">{taken.id} already has this pattern; each pattern can belong to one bracelet.</p>}
+      <label><input type="checkbox" checked={cleaned} onChange={(e) => setCleaned(e.target.checked)} /> Cleaned and ready to hand out</label>
+      <button disabled={!id || !/^[0-9A-F]{8}([0-9A-F]{6})?([0-9A-F]{6})?$/.test(uid) || !pattern || !!taken}
+        onClick={() => action(`/staff/bracelets/${encodeURIComponent(id)}/setup`, { rfid: uid, markers: [Number(pattern)], cleaned, reason: `Bracelet ${id}: ${PATTERNS[Number(pattern)]} pattern` })
+          .then(() => { setId(""); setUid(""); setPattern(""); }).catch(() => {})}>
+        Save bracelet
+      </button>
+    </details>
+  );
+}
+
 function VerifiedAssignment({data,action}:{data:any;action:Action}){
   const [sid,setSid]=useState(""),[bid,setBid]=useState(""),[uid,setUid]=useState(""),
     [confirmed,setConfirmed]=useState(false),[reason,setReason]=useState("");
