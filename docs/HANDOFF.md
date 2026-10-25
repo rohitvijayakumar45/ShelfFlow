@@ -1,5 +1,7 @@
 # ShelfFlow handoff (state as of 25 October 2026, ~02:00)
 
+**Newest:** the second-laptop session (25 Oct evening) is summarised in [HANDOFF-2026-10-25-laptop2.md](HANDOFF-2026-10-25-laptop2.md). Read it first.
+
 **Later update — new laptop and video training (25 Oct evening):** The project now also runs on a second laptop
 (RTX 4050, CUDA PyTorch 2.10). There the shelf controller is **COM7** and the programmer **COM9** (pass
 `--port COM7` to `tools.usb_bridge`); git-ignored files were restored from the old machine and the absolute
