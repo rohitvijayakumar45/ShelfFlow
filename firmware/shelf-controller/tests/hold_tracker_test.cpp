@@ -19,7 +19,7 @@ int main() {
     }
     return stepped;
   };
-  auto shownTotal = [&](double a, double c) {
+  auto shownTotal = [&](double a, double c) -> double {
     double m[2] = {a + drift[0], c + drift[1]};
     return tracker.shown(0, m[0]) + tracker.shown(1, m[1]);
   };
@@ -55,7 +55,29 @@ int main() {
   assert(!run(50, 50, 5000, false) && tracker.heldTotal() == 0);
   tracker.reset();                                // tare with something on: that becomes 0
   assert(!run(40, 40, 1000) && tracker.heldTotal() == 0 && near(shownTotal(40, 40), 0, .2));
+
+  // Steps are held in whole grams: a 12.4 g item reads 12, then 12.6 g more reads 25.
+  auto whole = [](double g) { return g == round(g); };
+  run(40, 40, 500, false);
+  assert(run(46.2, 46.2, 1000) && tracker.lastStep().post == 12 && whole(tracker.heldTotal()));
+  run(46.2, 46.2, 500, false);
+  assert(run(52.5, 52.5, 1000) && tracker.lastStep().post == 25 && tracker.heldTotal() == 25);
+  assert(near(shownTotal(52.5, 52.5), 25, .05));    // the live reading is moved onto the held value
+  run(52.5, 52.5, 500, false);                      // slide keeps the whole-gram total
+  assert(!run(62.5, 42.5, 3000) && tracker.heldTotal() == 25);
+
+  // Operator tare: exactly 0 at once, no settle wait, and stays 0 through drift.
+  double m[2] = {52.5 + drift[0], 52.5 + drift[1]};
+  tracker.tare(m, t);
+  assert(tracker.seededState() && tracker.heldTotal() == 0);
+  assert(tracker.shown(0, m[0]) + tracker.shown(1, m[1]) == 0);
+  assert(!run(52.5, 52.5, 30000) && tracker.heldTotal() == 0 && near(shownTotal(52.5, 52.5), 0, .2));
+
+  Tracker::Config unrounded; unrounded.roundG = 0;  // roundG 0 keeps the measured value
+  Tracker raw(unrounded); double first[2] = {0, 0}, item[2] = {6.2, 6.2};
+  raw.update(first, true, 0); raw.update(first, true, 700);
+  assert(raw.update(item, true, 1000) && near(raw.lastStep().post, 12.4, 1e-9));
   double bad[2] = {NAN, 0};
   assert(!tracker.update(bad, true, t));
-  puts("Hold tracker passed: auto re-tare, item steps up/down, slide, empty snap, reset");
+  puts("Hold tracker passed: auto re-tare, item steps up/down, slide, empty snap, reset, whole grams, tare");
 }

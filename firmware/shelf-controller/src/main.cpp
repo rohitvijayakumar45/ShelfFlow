@@ -184,6 +184,30 @@ void requestManualTare();
 void clearManualTare();
 void requestEmptyTare();
 bool weighingConsole(const String& command);
+// Guidance from the laptop (tray loading): two lines shown on the LCD until guideUntil.
+// '#' in a line is replaced by the live tray weight, so "on tray #" stays real time.
+String guideLine[2];
+uint32_t guideUntil = 0;
+void showGuide(String raw) {
+  // "lcd <seconds> <line 1>|<line 2>" or "lcd off". Text keeps its case; only printable ASCII.
+  raw.trim();
+  String rest = raw.substring(3); rest.trim();
+  if (rest.equalsIgnoreCase("off")) { guideUntil = 0; Serial.println("LCD GUIDE off"); return; }
+  int space = rest.indexOf(' ');
+  long seconds = space > 0 ? rest.substring(0, space).toInt() : 0;
+  if (seconds < 1 || seconds > 600) { Serial.println("LCD GUIDE refused: lcd <1-600 s> <line1>|<line2>"); return; }
+  String text = rest.substring(space + 1);
+  int bar = text.indexOf('|');
+  String lines[2] = {bar >= 0 ? text.substring(0, bar) : text, bar >= 0 ? text.substring(bar + 1) : ""};
+  for (int r = 0; r < 2; r++) {
+    String clean;
+    for (char ch : lines[r]) if (ch >= 0x20 && ch <= 0x7E && clean.length() < 16) clean += ch;
+    guideLine[r] = clean;
+  }
+  guideUntil = millis() + (uint32_t)seconds * 1000;
+  if (!guideUntil) guideUntil = 1;
+  Serial.printf("LCD GUIDE %lds\n", seconds);
+}
 char rfidCommand[160] = {};
 unsigned rfidCommandLength = 0;
 bool rfidCommandOverflow = false;
@@ -205,6 +229,7 @@ void rfidConsole() {
       if(command=="tare"){requestManualTare();continue;}
       if(command=="tareempty"){requestEmptyTare();continue;}
       if(command=="untare"){clearManualTare();continue;}
+      if(command.startsWith("lcd")){showGuide(String(rfidCommand));continue;}
       if(command.startsWith("ack ")){
         String event=String(rfidCommand).substring(4); // event IDs are lower-case firmware IDs
         Serial.printf("SF_ACK %s %s\n",event.c_str(),bus.acknowledgeEvent(event)?"removed":"not_found");continue;
@@ -425,7 +450,9 @@ Snap snapshot() {
     }
   }
   if (s.calibrated && !weighing.fresh(now)) s.ready = false;
-  s.displayTotal = s.total;
+  // Within a step of the held weight the reading is drift or jitter: show the held whole
+  // grams. A bigger difference is a hand or item on the move: show it live.
+  s.displayTotal = hold.seededState() && fabs(s.total - hold.heldTotal()) < EVENT_HYSTERESIS_G ? hold.heldTotal() : s.total;
   if (!s.calibrated) addFlag(s.flags, "UNCALIBRATED");
   if (!s.ready && s.calibrated) addFlag(s.flags, "NOT_READY");
   s.noise = s.calibrated ? sqrt(var) : 0;
@@ -784,7 +811,8 @@ void tickManualTare(Snap& s, uint32_t now) {
   double tareReference[NCELL];
   for (int i = 0; i < NCELL; ++i) tareReference[i] = reference[i];
   weighing.setTare(tareReference, tareEmptyRequested);
-  hold.reset();
+  s = snapshot();
+  hold.tare(s.measured, now);  // readings were stable for the tare: they are exactly 0 now
   Serial.printf("AZT_EMPTY_CONFIRMED %s\n", tareEmptyRequested ? "yes (operator tareempty)" : "no (loaded-reference tare)");
   // The raw event baseline is retained: subtracting the same offset from pre/post
   // cannot invent a weight change or erase a genuine pending load change.
@@ -987,7 +1015,13 @@ void handleButtons(const Snap& s) {
 }
 
 // ---------------- Display ----------------
-String fmtG(float g) { char b[12]; snprintf(b, sizeof b, "%.1f", g); return b; }
+// Whole grams (held weights, an exact tare) print without a decimal; "-0" prints as "0".
+String fmtG(float g) {
+  char b[12];
+  if (fabsf(g - rintf(g)) < 0.005f) snprintf(b, sizeof b, "%.0f", rintf(g) == 0 ? 0.0f : rintf(g));
+  else snprintf(b, sizeof b, "%.1f", g);
+  return b;
+}
 bool renderQuickCheck();
 void render(const Snap& s) {
   if (svc != SVC_OFF) {
@@ -1007,7 +1041,15 @@ void render(const Snap& s) {
     lcdLine(0, "TARE WAIT..."); lcdLine(1, "RELEASE HANDS"); return;
   }
   if (tareMessage.length() && (int32_t)(tareMessageUntil - millis()) > 0) {
-    lcdLine(0, tareMessage); lcdLine(1, fmtG(s.total) + " g"); return;
+    lcdLine(0, tareMessage); lcdLine(1, fmtG(s.displayTotal) + " g"); return;
+  }
+  if (guideUntil && (int32_t)(guideUntil - millis()) > 0) {
+    for (int r = 0; r < 2; r++) {
+      String line = guideLine[r];
+      line.replace("#", s.calibrated ? fmtG(s.displayTotal) + "g" : String("UNCAL"));
+      lcdLine(r, line);
+    }
+    return;
   }
   switch (page) {
     case 0:
