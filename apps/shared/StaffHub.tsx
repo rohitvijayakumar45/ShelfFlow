@@ -1,4 +1,5 @@
-import { ReactNode, useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { PhotoButton } from "./PhotoButton";
 import { ArrowRight, CheckCircle, GraduationCap, Scales, Users, VideoCamera, WarningCircle } from "@phosphor-icons/react";
 import { API, call, money } from "./api";
 import { MjpegView } from "./Live";
@@ -30,6 +31,55 @@ export function useCameraStatus(token: string, everyMs = 3000) {
   return camera;
 }
 
+/** Staff push channel (/ws/staff): the live tray weight about once a second, and a nudge after every committed
+ *  cart, review or shelf event so screens reload at once. Polling stays as the fallback. */
+export const STAFF_CHANGED = "shelfflow:staff-changed";
+export function useStaffSocket(token: string, onChanged: () => void) {
+  const [live, setLive] = useState<{ trays: Record<string, any>; at: number }>({ trays: {}, at: 0 });
+  const changed = useRef(onChanged);
+  changed.current = onChanged;
+  useEffect(() => {
+    if (!token) return;
+    let stop = false,
+      ws: WebSocket,
+      timer: ReturnType<typeof setTimeout>;
+    const open = () => {
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/staff`);
+      ws.onopen = () => (stop ? ws.close() : ws.send(JSON.stringify({ token })));
+      ws.onmessage = (e) => {
+        if (stop) return;
+        const m = JSON.parse(e.data);
+        if (m.type === "live") setLive({ trays: m.trays, at: Date.now() });
+        else if (m.type === "changed") {
+          changed.current();
+          window.dispatchEvent(new Event(STAFF_CHANGED));
+        }
+      };
+      ws.onclose = () => {
+        if (!stop) timer = setTimeout(open, 2000);
+      };
+    };
+    open();
+    return () => {
+      stop = true;
+      clearTimeout(timer);
+      ws?.close();
+    };
+  }, [token]);
+  return live;
+}
+
+/** Tray weight on staff screens: the pushed live reading while it keeps arriving, else the last shelf report.
+ *  `shown` follows the shelf LCD (held whole grams unless the tray is changing); `live` is the raw reading. */
+export function trayWeight(data: any, trayId?: string): { live: number; shown: number } | null {
+  const tray = data.trays.find((t: any) => t.id === trayId) ?? data.trays[0];
+  const pushed = data.live_weight?.[tray?.id];
+  if (pushed) return { live: pushed.live_g, shown: pushed.display_g };
+  const w = tray?.latest_sample?.weight;
+  return w ? { live: w.filtered ?? w.post_g ?? 0, shown: w.post_g ?? w.filtered ?? 0 } : null;
+}
+export const grams = (g: number) => `${Number.isInteger(g) ? g : g.toFixed(1)} g`;
+
 export const pendingOf = (data: any) => (data?.hypotheses || []).filter((h: any) => ["PENDING_REVIEW", "DISPUTED"].includes(h.status));
 export function controllerOnline(data: any) {
   const sensor = (data?.devices || []).find((d: any) => d.id.startsWith("sensor"));
@@ -41,7 +91,7 @@ const when = (ts?: number | null) => {
   const today = d.toDateString() === new Date().toDateString();
   return (today ? "" : d.toLocaleDateString(undefined, { day: "numeric", month: "short" }) + " ") + d.toLocaleTimeString();
 };
-const human = (code: string) => code.replaceAll("_", " ").toLowerCase();
+import { reasonText as human } from "./reasons";
 
 export function StatusChips({ data, camera, go }: { data: any; camera: any; go: Go }) {
   const pending = pendingOf(data).length;
@@ -77,8 +127,7 @@ export function Tabs({ tabs, value, onChange }: { tabs: [string, string][]; valu
 export function Home({ data, token, action, camera, go }: { data: any; token: string; action: Action; camera: any; go: Go }) {
   const pending = pendingOf(data);
   const shoppers = data.sessions.filter((s: any) => s.status === "ACTIVE").length;
-  const tray = data.trays[0];
-  const weight = tray?.latest_sample?.weight;
+  const weight = trayWeight(data);
   const tiles: [string, string, string, boolean, string][] = [
     ["Camera", camera?.available ? "Live" : "Offline", camera?.available ? "Watch the shelf" : "Check power and hotspot", !!camera?.available, "Live camera"],
     ["Shelf controller", controllerOnline(data) ? "Connected" : "No signal", controllerOnline(data) ? "Weights and RFID arriving" : "Check USB and the bridge", controllerOnline(data), "Shelf setup"],
@@ -104,7 +153,7 @@ export function Home({ data, token, action, camera, go }: { data: any; token: st
           </div>
           <MjpegView url={API + "/staff/camera/stream"} token={token} empty="Camera offline — see Live camera for what to check" />
           <p className="muted">
-            {weight ? `Tray weight: ${(weight.post_g ?? weight.filtered ?? 0).toFixed(1)} g · ` : ""}
+            {weight ? `Tray weight: ${grams(weight.shown)} · ` : ""}
             Sees: {(camera?.predictions || []).map((p: any) => p.product || "unknown item").join(", ") || "no products"}
           </p>
         </section>
@@ -154,8 +203,7 @@ export function LiveCamera({ data, token, go }: { data: any; token: string; go: 
   const [view, setView] = useState<"detections" | "raw">("detections");
   const [fps, setFps] = useState(0);
   const camera = useCameraStatus(token, 1000);
-  const tray = data.trays[0];
-  const weight = tray?.latest_sample?.weight;
+  const weight = trayWeight(data);
   return (
     <div className="livegrid">
       <section className="panel">
@@ -191,7 +239,7 @@ export function LiveCamera({ data, token, go }: { data: any; token: string; go: 
         <section className="panel">
           <h2>Tray weight</h2>
           {weight ? (
-            <p className="bignumber">{(weight.post_g ?? weight.filtered ?? 0).toFixed(1)} g</p>
+            <p className="bignumber">{grams(weight.shown)}</p>
           ) : (
             <p className="muted">No reading yet.</p>
           )}
@@ -372,7 +420,9 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
   const key = useMemo(() => crypto.randomUUID(), [h.id]);
   const active = data.sessions.filter((x: any) => x.status === "ACTIVE");
   const guess = s?.product_id || h.proposal?.product_id;
-  const canRecord = !!s && !!product && !!session && !busy;
+  // Shelf weight step attributed to the shopper at the shelf (rfid attribution): confirm straight into the cart.
+  const shelf = !s && h.proposal?.source === "SHELF_WEIGHT";
+  const canRecord = (!!s || shelf) && !!product && !!session && !busy;
   async function run(fn: () => Promise<any>) {
     setBusy(true);
     setError("");
@@ -387,7 +437,15 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
   const record = () =>
     canRecord &&
     run(() =>
-      call(`/staff/preintegration/from-evidence/${h.id}`, token, {
+      shelf
+        ? call(`/staff/review/${h.id}`, token, {
+            decision: "CONFIRM",
+            session_id: session,
+            product_id: product,
+            quantity: h.proposal.quantity || 1,
+            reason: note.trim() || "Checked the shelf weight and camera",
+          })
+        : call(`/staff/preintegration/from-evidence/${h.id}`, token, {
         product_id: product,
         session_id: session,
         quantity_delta: (direction === "PICKUP" ? 1 : -1) * (s.quantity || 1),
@@ -406,6 +464,31 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
         reason: note.trim() || "No real product movement in the clip",
       }),
     );
+  // A shelf pickup nobody is charged for (staff took it, a shopper who wasn't tapped in): the scale proved it
+  // left, so its weighed units leave the tray stock too. "Not a real movement" keeps the stock as it was.
+  const leftTray = () =>
+    !busy &&
+    run(() =>
+      call(`/staff/review/${h.id}`, token, {
+        decision: "LEFT_TRAY",
+        session_id: null,
+        quantity: 1,
+        reason: note.trim() || "Left the tray, nobody charged",
+      }),
+    );
+  // An item put on the tray that no cart holds (staff restocking, an item already billed): new stock, no cart change.
+  const restock = () =>
+    !busy &&
+    !!product &&
+    run(() =>
+      call(`/staff/review/${h.id}`, token, {
+        decision: "RESTOCK",
+        session_id: null,
+        product_id: product,
+        quantity: 1,
+        reason: note.trim() || "Put on the tray as stock",
+      }),
+    );
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
@@ -421,7 +504,16 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
     return () => window.removeEventListener("keydown", onKey);
   });
   const name = (id: string) => data.products.find((p: any) => p.id === id)?.name || id;
-  const defaultNote = s ? "Checked the camera clip" : "No real product movement in the clip";
+  const defaultNote = s ? "Checked the camera clip" : shelf ? "Checked the shelf weight and camera" : "No real product movement in the clip";
+  const why: string[] = s?.why || [
+    ...(shelf
+      ? [
+          `Shelf weight ${h.proposal.weight_delta_g > 0 ? "+" : ""}${h.proposal.weight_delta_g} g.`,
+          h.proposal.customer_source ? `Shopper from ${h.proposal.customer_source}.` : "No shopper was at the shelf: choose one.",
+        ]
+      : []),
+    ...(h.reason || []).map(human),
+  ];
   return (
     <div className="quickreview">
       <p className="quickwhen">
@@ -430,16 +522,17 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
       </p>
       {h.frames > 0 || s ? <EvidencePlayer eventId={h.event_id} token={token} autoPlay /> : <p className="muted">No video stored for this item.</p>}
       <ul className="why">
-        {(s?.why || (h.reason || []).map(human)).map((w: string) => (
+        {why.map((w: string) => (
           <li key={w}>{w}</li>
         ))}
       </ul>
-      {s ? (
+      {s || shelf ? (
         <>
           <div className="pickrow">
             <span>Movement</span>
-            <button className={direction === "PICKUP" ? "pick selected" : "pick"} onClick={() => setDirection("PICKUP")}>Picked up</button>
-            <button className={direction === "RETURN" ? "pick selected" : "pick"} onClick={() => setDirection("RETURN")}>Put back</button>
+            {/* A shelf weight step's direction is the weight's: down is a pickup, up a return. */}
+            <button className={direction === "PICKUP" ? "pick selected" : "pick"} disabled={shelf} onClick={() => setDirection("PICKUP")}>Picked up</button>
+            <button className={direction === "RETURN" ? "pick selected" : "pick"} disabled={shelf} onClick={() => setDirection("RETURN")}>Put back</button>
           </div>
           <div className="pickrow">
             <span>Product</span>
@@ -448,7 +541,7 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
                 <button key={p.id} className={product === p.id ? "productpick selected" : "productpick"} onClick={() => setProduct(p.id)}>
                   <AuthImage path={`/staff/product-image/${encodeURIComponent(p.id)}`} token={token} alt="" className="pickimg" />
                   <span>{p.name}</span>
-                  {p.id === guess && <small>camera guess</small>}
+                  {p.id === guess && <small>{shelf ? "suggested" : "camera guess"}</small>}
                 </button>
               ))}
             </div>
@@ -470,9 +563,19 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
       )}
       <input className="quicknote" value={note} onChange={(e) => setNote(e.target.value)} placeholder={`Note (optional). Default: "${defaultNote}"`} />
       <div className="quickbuttons">
-        {s && (
+        {(s || shelf) && (
           <button disabled={!canRecord} onClick={record}>
             Record: {direction === "PICKUP" ? "picked up" : "put back"} {product ? name(product) : "…"} <kbd>Enter</kbd>
+          </button>
+        )}
+        {shelf && h.proposal.action === "RETURN" && (
+          <button className="secondary" disabled={busy || !product} onClick={restock}>
+            Put on the tray as stock {product ? `· ${name(product)}` : ""}
+          </button>
+        )}
+        {shelf && h.proposal.action === "PICKUP" && (
+          <button className="secondary" disabled={busy} onClick={leftTray}>
+            Left the tray, nobody charged
           </button>
         )}
         <button className="danger" disabled={busy} onClick={dismiss}>
@@ -483,7 +586,7 @@ function QuickReview({ item, data, token, action, onDone, onPrev, onNext }: {
         </button>
       </div>
       {error && <p className="error">{error}</p>}
-      {!s && (
+      {!s && !shelf && (
         <details open={more} onToggle={(e) => setMore((e.target as HTMLDetailsElement).open)}>
           <summary>More options (confirm into a cart, corrections)</summary>
           {more && <ReviewCard h={h} data={data} token={token} action={action} />}
@@ -516,6 +619,7 @@ function Catalogue({ data, token, action, openTab }: { data: any; token: string;
   const [trained, setTrained] = useState<string[] | null>(null);
   const [form, setForm] = useState({ product_id: "", name: "", price: "" });
   const [error, setError] = useState("");
+  const [photoVersion, setPhotoVersion] = useState<Record<string, number>>({});
   useEffect(() => {
     call("/staff/references", token).then(setRefs).catch(() => {});
     fetch("/trainer/status", { headers: { Authorization: `Bearer ${token}` } })
@@ -540,7 +644,7 @@ function Catalogue({ data, token, action, openTab }: { data: any; token: string;
             {data.products.map((p: any) => (
               <tr key={p.id}>
                 <td className="productcell">
-                  <AuthImage path={`/staff/product-image/${encodeURIComponent(p.id)}`} token={token} alt="" className="pickimg" />
+                  <AuthImage path={`/staff/product-image/${encodeURIComponent(p.id)}?v=${photoVersion[p.id] || 0}`} token={token} alt="" className="pickimg" />
                   <span>{p.name}<br /><small className="muted">{p.id}</small></span>
                 </td>
                 <td>{money(p.price_minor)}</td>
@@ -549,7 +653,8 @@ function Catalogue({ data, token, action, openTab }: { data: any; token: string;
                 <td>{photos(p.id) || <span className="lowstock">none</span>}</td>
                 <td className="rowactions">
                   <button className="secondary" onClick={() => openTab("train", p.id)}>Train</button>
-                  <button className="textbutton" onClick={() => openTab("photos", p.id)}>Photos</button>
+                  <PhotoButton productId={p.id} token={token} hasPhoto={!!photoVersion[p.id]} onDone={() => setPhotoVersion((v) => ({ ...v, [p.id]: Date.now() }))} />
+                  <button className="textbutton" onClick={() => openTab("photos", p.id)}>Recognition photos</button>
                 </td>
               </tr>
             ))}

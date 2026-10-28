@@ -197,3 +197,46 @@ def test_unknown_check_flags_objects_unlike_their_product(tmp_path):
     out = verify.TrackCheck(v).apply(scene, found, "tray-a")
     assert [d.sku for d in out] == ["sanitizer", "UNKNOWN", "vicks"]
     assert verify.Verifier.for_weights(tmp_path / "other.pt") is None  # no references: no check at all
+
+
+class FakeLabeller(T.AutoLabeller):
+    """The parent model: sees vicks on the tray, plus the recorded band itself (which must not double up)."""
+    def __init__(self, seen=None):
+        self.seen = seen or [("vicks", [400, 50, 520, 200]), ("band-stripe", [101, 121, 259, 299])]
+        self.names, self.added, self.dropped = dict(enumerate(sorted({p for p, _ in self.seen}))), 0, 0
+
+    def detect(self, image_path):
+        return self.seen
+
+
+def test_other_products_in_a_recording_are_labelled_not_background(tmp_path):
+    band = make_session(tmp_path / "s", "band", "product", "band-stripe", 40)
+    bg = make_session(tmp_path / "s", "bg", "background", None, 20)
+    out = T.build_dataset([band, bg], tmp_path / "d", labeller=FakeLabeller())
+    assert out["classes"] == ["band-stripe", "vicks"] and out["auto_labels"] == 40   # one vicks per band frame
+    rows = (tmp_path / "d/labels/train").glob("band_*.txt").__next__().read_text().splitlines()
+    assert sorted(r.split()[0] for r in rows) == ["0", "1"]                          # band + vicks, band not twice
+    assert (tmp_path / "d/labels/train").glob("bg_*.txt").__next__().read_text() == ""  # empty tray stays empty
+
+
+def test_frames_whose_box_jumped_onto_another_product_are_left_out(tmp_path):
+    # SAM lost the band and now boxes the vicks jar: the parent is sure that box is vicks.
+    band = make_session(tmp_path / "s", "band", "product", "band-circle", 40, box=(400, 50, 520, 200))
+    good = make_session(tmp_path / "s", "ok", "product", "band-circle", 40)
+    out = T.build_dataset([band, good], tmp_path / "d", labeller=FakeLabeller([("vicks", [402, 52, 518, 198])]))
+    assert out["dropped_mislabelled"] == 40 and not list((tmp_path / "d/labels/train").glob("band_*.txt"))
+    assert out["counts"]["band-circle"]["train"] > 0 and out["counts"]["vicks"]["train"] > 0  # the good clip, + auto vicks
+
+
+def test_parent_never_judges_bracelet_bands():
+    class Boxes:
+        cls = type("T", (), {"tolist": lambda self: [0, 1]})()
+        xyxy = type("T", (), {"tolist": lambda self: [[0, 0, 10, 10], [20, 20, 30, 30]]})()
+    class Model:
+        overrides = {"imgsz": 320}
+        names = {0: "band-circle", 1: "vicks"}
+        def predict(self, *a, **k):
+            return [type("R", (), {"boxes": Boxes()})()]
+    labeller = T.AutoLabeller.__new__(T.AutoLabeller)
+    labeller.model, labeller.device, labeller.names, labeller.added, labeller.dropped = Model(), "cpu", Model.names, 0, 0
+    assert labeller.detect("frame.jpg") == [("vicks", [20, 20, 30, 30])]

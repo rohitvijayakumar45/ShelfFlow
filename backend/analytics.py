@@ -257,6 +257,15 @@ def suggestion(db, h):
             "confidence": confidence, "why": why}
 
 # ---------------------------------------------------------------- evidence timeline
+def clip_event(db, event):
+    """The event whose frames show this one: itself, or for a shelf weight change (no frames of its own) the
+    camera report that cites it, so a review item decided by the weight still plays the pickup."""
+    if any(str(r).endswith(".jpg") for r in event.payload.get("evidence_refs", [])):
+        return event
+    return db.scalar(select(SensorEvent).where(
+        SensorEvent.device_id == "vision-1", SensorEvent.payload["evidence_refs"].as_string().contains("SENSOR_EVENT:" + event.id))
+        .order_by(SensorEvent.received.desc()).limit(1)) or event
+
 def timeline(db, event_id, pad_s=8.0):
     e = db.get(SensorEvent, event_id)
     if not e:
@@ -277,7 +286,7 @@ def timeline(db, event_id, pad_s=8.0):
                          "reader": next((r[12:] for r in refs if r.startswith("RFID_READER:")), None)})
     root = Path(os.getenv("EVIDENCE_ROOT", "evidence")).resolve()
     frames = []
-    for ref in e.payload.get("evidence_refs", []):
+    for ref in clip_event(db, e).payload.get("evidence_refs", []):
         if not ref.endswith(".jpg"):
             continue
         meta = root / ref.replace(".jpg", ".json")

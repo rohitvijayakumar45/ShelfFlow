@@ -43,7 +43,12 @@ export type Cart = {
   }[];
   total_minor: number;
   pending: { id: string; tray_id: string; reasons: string[]; status: string }[];
-  bracelet: { id: string; state: string } | null;
+  bracelet: { id: string; state: string; markers?: number[] } | null;
+  exit_requested?: boolean;
+  checkout_requested?: boolean; // pressed Checkout; the exit-reader tap bills the visit
+  checkout_needs_tap?: boolean;
+  exit_reader?: string;
+  exit_blockers?: string[];
   receipt: any;
   mode: string;
   weights_enabled?: boolean;

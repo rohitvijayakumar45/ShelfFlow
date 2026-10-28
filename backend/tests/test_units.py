@@ -233,7 +233,7 @@ def test_staff_remove_unit_and_api_loading_flow():
 def test_wizard_flow_with_simulated_placements_and_bench_pickup(monkeypatch, tmp_path):
     import backend.main as main
     monkeypatch.setenv("EVIDENCE_ROOT", str(tmp_path))
-    monkeypatch.setattr(main, "camera_jpeg", lambda: b"\xff\xd8 still \xff\xd9")
+    monkeypatch.setattr(main, "raw_camera_jpeg", lambda: b"\xff\xd8 still \xff\xd9")  # loading stills are original frames
     with TestClient(app) as c:
         headers = {"Authorization": "Bearer " + c.post("/auth/staff", json={"password": "local-demo-staff"}).json()["token"]}
         with s.transaction() as db:

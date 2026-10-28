@@ -2,6 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "backend",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.local_app",
+        "backend"
+      ],
+      "port": 8000
+    },
+    {
       "name": "staff",
       "runtimeExecutable": "node",
       "runtimeArgs": [
@@ -26,6 +36,105 @@
       ],
       "cwd": "apps/customer",
       "port": 5173
+    },
+    {
+      "name": "staff-lan",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "../node_modules/vite/bin/vite.js",
+        "--mode",
+        "lan",
+        "--port",
+        "5174",
+        "--strictPort"
+      ],
+      "cwd": "apps/staff",
+      "port": 5174,
+      "url": "https://localhost:5174"
+    },
+    {
+      "name": "customer-lan",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "../node_modules/vite/bin/vite.js",
+        "--mode",
+        "lan",
+        "--port",
+        "5173",
+        "--strictPort"
+      ],
+      "cwd": "apps/customer",
+      "port": 5173,
+      "url": "https://localhost:5173"
+    },
+    {
+      "name": "demo-setup",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.demo_lan"
+      ],
+      "port": 5180
+    },
+    {
+      "name": "backend-sim",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "C:/Users/rohit/AppData/Local/Temp/claude/C--Users-rohit-Projects-ShelfFlow/8116fce7-c89d-4eb3-8b58-f1314432fc18/scratchpad/sim_backend.py",
+        "C:/Users/rohit/Projects/ShelfFlow"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "camera-preview",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.camera_preview",
+        "--camera",
+        "http://10.33.1.251"
+      ],
+      "port": 8765
+    },
+    {
+      "name": "detector-preview",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.detector_preview"
+      ],
+      "port": 8766
+    },
+    {
+      "name": "usb-bridge",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.usb_bridge",
+        "--port",
+        "COM3"
+      ],
+      "port": 9999
+    },
+    {
+      "name": "cell-monitor",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.cell_monitor",
+        "--lan"
+      ],
+      "port": 8770
+    },
+    {
+      "name": "trainer",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "tools.local_app",
+        "trainer"
+      ],
+      "port": 8001
     }
   ]
 }

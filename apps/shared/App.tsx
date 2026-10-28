@@ -19,12 +19,18 @@ import {
   ChartLine,
   GraduationCap,
   VideoCamera,
+  Clock,
+  Hand,
+  Hourglass,
+  DoorOpen,
 } from "@phosphor-icons/react";
 import { call, money, Cart } from "./api";
+import { reasonText } from "./reasons";
+import { PhotoButton } from "./PhotoButton";
 import { Preintegration } from "./Preintegration";
 import { ManualCapture } from "./ManualCapture";
-import { Go, Home, LiveCamera, ProductsHub, ReviewQueue, StatusChips, Tabs, pendingOf, useCameraStatus } from "./StaffHub";
-import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts } from "./Insights";
+import { Go, Home, LiveCamera, ProductsHub, ReviewQueue, StatusChips, Tabs, pendingOf, trayWeight, useCameraStatus, useStaffSocket } from "./StaffHub";
+import { Insights, HelpTheCamera, ShelfMap, EvidencePlayer, Suggestion, ProductThumb, useCartToasts, AuthImage } from "./Insights";
 
 function Brand() {
   return (
@@ -78,65 +84,44 @@ function Login({
     }
   }
   return (
-    <>
-      <header>
+    <div className="v-app">
+      <header className="v-header">
         <Brand />
-        <span className="tag">Prototype · simulated payment</span>
+        <span className="v-chip">Demo · no real payments</span>
       </header>
-      <main className="welcome">
-        <div>
-          <p className="eyebrow">
-            {staff ? "STORE OPERATIONS" : "A LITTLE LESS CHECKOUT"}
-          </p>
-          <h1>
+      <main className={staff ? "v-main v-login staff" : "v-main v-login"}>
+        <div className="v-intro">
+          <h1>{staff ? "Run the store" : "Pick it up. We'll keep track."}</h1>
+          <p className="muted">
             {staff
-              ? "A clear view of\nyour store."
-              : "Pick it up.\nWe’ll keep track."}
-          </h1>
-          <p className="lede">
-            {staff
-              ? "Review shelf evidence, manage bracelets, and keep every cart accountable."
-              : "Your shopping cart updates as you browse. Ambiguous interactions go to staff for review."}
+              ? "Check shoppers in and out, settle what the shelf couldn't, and keep stock right."
+              : "Your basket fills itself as you shop. Anything the shelf isn't sure about is checked by staff before you're charged."}
           </p>
-          <Notice>
-            Shelf camera and weight sensors record changes. Staff review
-            uncertain items and customer attribution before cart changes.
-          </Notice>
         </div>
-        <form className="panel login" onSubmit={submit}>
-          <ShoppingBag size={32} />
+        <form className="v-card" onSubmit={submit}>
           <h2>{staff ? "Staff sign in" : "Start your visit"}</h2>
           <label>
-            {staff ? "Staff password" : "Your demo name"}
+            {staff ? "Staff password" : "Your name or username"}
             <input
               type={staff ? "password" : "text"}
               required
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              placeholder={staff ? "Enter configured password" : "e.g. Rohit"}
-              autoComplete={staff ? "current-password" : "given-name"}
+              placeholder={staff ? "" : "shopper"}
+              autoComplete={staff ? "current-password" : "username"}
             />
           </label>
           {!staff && (
             <label>
-              Account password (leave empty for simulation)
-              <input
-                type="password"
-                value={accountPassword}
-                onChange={(e) => setAccountPassword(e.target.value)}
-                autoComplete="current-password"
-              />
+              Password
+              <input type="password" value={accountPassword} onChange={(e) => setAccountPassword(e.target.value)} autoComplete="current-password" />
+              <small className="muted">Leave empty in the simulator.</small>
             </label>
           )}
-          <button disabled={busy}>
-            {busy ? "Connecting…" : staff ? "Open operations" : "Get entry QR"}
+          <button className="v-primary" disabled={busy}>
+            {busy ? "Signing in…" : staff ? "Sign in" : "Continue"}
             <ArrowRight />
           </button>
-          <p className="muted">
-            {staff
-              ? "Local default password is documented in setup."
-              : "Demo enrollment. No real payment will be collected."}
-          </p>
           {error && (
             <p role="alert" className="error">
               {error}
@@ -144,60 +129,78 @@ function Login({
           )}
         </form>
       </main>
-    </>
+    </div>
+  );
+}
+/** Where the visit is: one screen that moves through entry, shopping, leaving and the bill. */
+function phaseOf(cart: Cart | null) {
+  if (!cart) return "loading";
+  if (cart.status === "COMPLETE") return "bill";
+  if (cart.status === "ACTIVE") return cart.exit_requested ? "leaving" : cart.checkout_requested ? "checkout" : "shopping";
+  return "entry";
+}
+const STEPS = [["entry", "Enter"], ["shopping", "Shop"], ["bill", "Bill"]] as const;
+
+function VisitSteps({ phase }: { phase: string }) {
+  const at = phase === "leaving" || phase === "checkout" ? 1 : Math.max(0, STEPS.findIndex(([p]) => p === phase));
+  return (
+    <ol className="v-steps" aria-label="Visit progress">
+      {STEPS.map(([p, label], i) => (
+        <li key={p} className={i < at ? "done" : i === at ? "current" : ""} aria-current={i === at ? "step" : undefined}>
+          <span>{i < at ? <CheckCircle size={14} weight="bold" /> : i + 1}</span>
+          {label}
+        </li>
+      ))}
+    </ol>
   );
 }
 
+function useCountdown(until: number | null) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!until) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [until]);
+  return until ? Math.max(0, Math.round((until - now) / 1000)) : 0;
+}
+
 export function Customer() {
-  const [token, setToken] = useState(
-      sessionStorage.getItem("customer-token") || "",
-    ),
+  const [token, setToken] = useState(sessionStorage.getItem("customer-token") || ""),
     [cart, setCart] = useState<Cart | null>(null),
     [connected, setConnected] = useState(false),
     [error, setError] = useState(""),
-    [qr, setQr] = useState<{ token: string; expires_in: number } | null>(null),
+    [qr, setQr] = useState<{ token: string; until: number } | null>(null),
     [busy, setBusy] = useState(false),
-    [tab, setTab] = useState("cart"),
     [disputeFor, setDisputeFor] = useState("");
-  const [toasts, dismissToast] = useCartToasts(
-    cart ? [...cart.confirmed_events, ...(cart.assisted_events || [])] : undefined,
-  );
+  const [toasts, dismissToast] = useCartToasts(cart ? [...cart.confirmed_events, ...(cart.assisted_events || [])] : undefined);
   const disputeBox = useRef<HTMLDetailsElement>(null);
+  const left = useCountdown(qr?.until ?? null);
   useEffect(() => {
     if (!token) return;
     let stop = false,
       ws: WebSocket,
       timer: ReturnType<typeof setTimeout>;
+    const signOut = () => {
+      sessionStorage.removeItem("customer-token");
+      setToken("");
+      setCart(null);
+    };
     const open = () => {
-      ws = new WebSocket(
-        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/cart`,
-      );
-      ws.onopen = () => {
-        if (stop) {
-          ws.close();
-          return;
-        }
-        ws.send(JSON.stringify({ token }));
-      };
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/cart`);
+      ws.onopen = () => (stop ? ws.close() : ws.send(JSON.stringify({ token })));
       ws.onmessage = (e) => {
         if (stop) return;
         const data = JSON.parse(e.data);
         setConnected(true);
-        if (data.type === "snapshot")
-          setCart((prev) =>
-            !prev || data.version >= prev.version ? data : prev,
-          );
+        if (data.type === "snapshot") setCart((prev) => (!prev || data.version >= prev.version ? data : prev));
       };
       ws.onclose = (event) => {
         if (stop) return;
         setConnected(false);
-        if (event.code === 1008) {
-          sessionStorage.removeItem("customer-token");
-          setToken("");
-          setCart(null);
-          return;
-        }
-        if (!stop) timer = setTimeout(open, 2000);
+        if (event.code === 1008) return signOut();
+        timer = setTimeout(open, 2000);
       };
       ws.onerror = () => {
         if (!stop) setConnected(false);
@@ -210,11 +213,8 @@ export function Customer() {
       })
       .catch((e) => {
         if (stop) return;
-        if (e.status === 401) {
-          sessionStorage.removeItem("customer-token");
-          setToken("");
-          setCart(null);
-        } else setError(String(e));
+        if (e.status === 401) signOut();
+        else setError(String(e.message || e));
       });
     return () => {
       stop = true;
@@ -222,33 +222,59 @@ export function Customer() {
       ws?.close();
     };
   }, [token]);
+  useEffect(() => {
+    if (qr && left === 0) setQr(null);
+  }, [left]);
+  useEffect(() => {
+    if (cart && cart.status !== "ENTRY") setQr(null);
+  }, [cart?.status]);
   async function action(fn: () => Promise<unknown>) {
     setBusy(true);
     setError("");
     try {
       await fn();
       setCart(await call("/customer/cart", token));
-    } catch (e) {
-      setError(String(e));
+    } catch (e: any) {
+      setError(String(e.message || e));
     } finally {
       setBusy(false);
     }
   }
-  useEffect(() => {
-    if (qr) {
-      const timer = setTimeout(() => setQr(null), qr.expires_in * 1000);
-      return () => clearTimeout(timer);
+  // Bracelet handed over after the bill: switch to the customer's next visit and show its entry code at once.
+  async function handedOver() {
+    setBusy(true);
+    setError("");
+    try {
+      const next = await call("/customer/next-visit", token, {});
+      const code = await call("/customer/entry-token", next.token, {});
+      sessionStorage.setItem("customer-token", next.token);
+      setCart(null);
+      setToken(next.token);
+      setQr({ token: code.token, until: Date.now() + code.expires_in * 1000 });
+      window.scrollTo({ top: 0 });
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy(false);
     }
-  }, [qr]);
+  }
   if (!token) return <Login onLogin={setToken} />;
+  const phase = phaseOf(cart);
+  const count = cart?.items.reduce((n, i) => n + i.quantity, 0) || 0;
+  const pending = cart?.pending.length || 0;
+  const pattern = (cart?.bracelet?.markers || []).map((m) => PATTERNS[m]).filter(Boolean).join(", ") || null;
+  const notMine = (id: string) => {
+    setDisputeFor(id);
+    if (disputeBox.current) disputeBox.current.open = true;
+    disputeBox.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   return (
-    <>
-      <header>
+    <div className="v-app">
+      <header className="v-header">
         <Brand />
         <div className="headeractions">
-          <span className={connected ? "live" : "offline"}>
-            <WifiHigh />
-            {connected ? "Live cart" : "Reconnecting"}
+          <span className={connected ? "live" : "offline"} role="status">
+            <WifiHigh /> {connected ? "Live" : "Reconnecting…"}
           </span>
           <button
             className="iconbutton"
@@ -263,295 +289,240 @@ export function Customer() {
           </button>
         </div>
       </header>
-      <div className="customerlayout">
-        <main>
-          <p className="eyebrow">YOUR VISIT</p>
-          <h1>
-            A good shop,
-            <br />
-            without the queue.
-          </h1>
-          <p className="lede">Pick up what you love. Return what you don’t.</p>
-          <div className="visitsteps">
-            {["Entry", "Shopping", "Receipt"].map((s, i) => (
-              <span
-                key={s}
-                className={
-                  cart &&
-                  ((i === 0 && cart.status === "ENTRY") ||
-                    (i === 1 && cart.status === "ACTIVE") ||
-                    (i === 2 && cart.status === "COMPLETE"))
-                    ? "current"
-                    : ""
+      <main className="v-main">
+        <VisitSteps phase={phase} />
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {phase === "loading" && <p className="muted">Loading your visit…</p>}
+
+        {phase === "entry" && (
+          <section className="v-card v-entry">
+            <h1>Your entry pass</h1>
+            <p className="muted">Show this code to staff at the entrance. They'll hand you a bracelet and your basket turns on.</p>
+            {qr ? (
+              <>
+                <div className="v-qr">
+                  <QRCodeSVG value={qr.token} size={232} marginSize={2} />
+                </div>
+                <p className="v-timer">
+                  <Clock size={16} /> Valid for {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")} · single use
+                </p>
+                <details>
+                  <summary>Staff can't scan it?</summary>
+                  <code className="token">{qr.token}</code>
+                </details>
+              </>
+            ) : (
+              <button
+                className="v-primary"
+                disabled={busy}
+                onClick={() =>
+                  action(async () => {
+                    const r = await call("/customer/entry-token", token, {});
+                    setQr({ token: r.token, until: Date.now() + r.expires_in * 1000 });
+                  })
                 }
               >
-                {String(i + 1).padStart(2, "0")} {s}
-              </span>
-            ))}
-          </div>
-          <Notice>
-            Use your bracelet-wearing hand. One camera covers this shelf;
-            uncertain interactions stay pending and are excluded from your
-            total.
-          </Notice>
-          <div className="tabs">
-            <button
-              className={tab === "cart" ? "selected" : ""}
-              onClick={() => setTab("cart")}
-            >
-              Shopping cart
-            </button>
-            <button
-              className={tab === "visit" ? "selected" : ""}
-              onClick={() => setTab("visit")}
-            >
-              Entry & bracelet
-            </button>
-            <button
-              className={tab === "receipt" ? "selected" : ""}
-              onClick={() => setTab("receipt")}
-            >
-              Receipt
-            </button>
-          </div>
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-          {!cart ? (
-            <p>Loading your visit…</p>
-          ) : tab === "visit" || cart.status === "ENTRY" ? (
-            <section className="panel entry">
-              <QrCode size={28} />
-              <h2>Your entry pass</h2>
-              <p>
-                Show this QR to the staff gate scanner. Staff verifies bracelet
-                release before your cart activates.
-              </p>
-              {qr ? (
-                <>
-                  <QRCodeSVG value={qr.token} size={220} />
-                  <details>
-                    <summary>Manual token fallback</summary>
-                    <code className="token">{qr.token}</code>
-                  </details>
-                  <p className="muted">
-                    Expires after two minutes. Single use.
-                  </p>
-                </>
-              ) : (
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    action(async () =>
-                      setQr(await call("/customer/entry-token", token, {})),
-                    )
-                  }
-                >
-                  Generate entry QR
-                </button>
-              )}
-              <p>
-                Bracelet:{" "}
-                {cart.bracelet
-                  ? `${cart.bracelet.id} · ${cart.bracelet.state}`
-                  : "Awaiting assignment"}
-              </p>
-            </section>
-          ) : tab === "receipt" ? (
-            <section className="panel">
-              <Receipt size={28} />
-              <h2>Your receipt</h2>
-              {cart.receipt ? (
-                <>
-                  <p className="tag">SIMULATED PAYMENT</p>
-                  {cart.receipt.items.map((i: any) => (
-                    <div className="row" key={i.product_id}>
-                      <span>
-                        {i.quantity} × {i.name}
-                      </span>
-                      <b>{money(i.quantity * i.price_minor)}</b>
-                    </div>
-                  ))}
-                  <div className="row">
-                    <b>Total</b>
-                    <b>{money(cart.receipt.total_minor)}</b>
-                  </div>
-                  <p className="muted">Order {cart.receipt.order_id}</p>
-                  {cart.corrections.map((c: any) => (
-                    <Notice key={c.id}>
-                      Audited simulated adjustment: {money(c.amount_minor)} ·{" "}
-                      {c.reason}
-                    </Notice>
-                  ))}
-                </>
-              ) : (
-                <p>
-                  Your receipt appears after reconciliation and simulated
-                  payment.
-                </p>
-              )}
-            </section>
-          ) : cart.status === "COMPLETE" ? (
-            <section className="panel exitsummary">
-              <CheckCircle size={36} />
-              <h2>Thanks for shopping with us.</h2>
-              <p>Your simulated payment is complete. Please drop your bracelet at the gate on the way out.</p>
-              {(cart.receipt?.items || []).map((i: any) => (
-                <div className="cartrow" key={i.product_id}>
-                  <ProductThumb productId={i.product_id} token={token} hasImage={cart.items.find((c) => c.product_id === i.product_id)?.has_image ?? true} />
-                  <div>
-                    <h3>{i.name}</h3>
-                    <span className="muted">{money(i.price_minor)} each</span>
-                  </div>
-                  <span className="quantity">× {i.quantity}</span>
-                  <b>{money(i.quantity * i.price_minor)}</b>
-                </div>
-              ))}
-              <div className="row">
-                <b>Total paid (simulated)</b>
-                <b>{money(cart.receipt?.total_minor || 0)}</b>
-              </div>
-              <p className="muted">
-                Something wrong? Use “Dispute a confirmed interaction” within this visit, or ask staff. Order {cart.receipt?.order_id?.slice(0, 8)}.
-              </p>
-            </section>
-          ) : (
-            <section className="panel cart">
-              <div className="sectionhead">
-                <h2>Your basket</h2>
-                <span>
-                  {cart.items.reduce((n, i) => n + i.quantity, 0)} items
+                <QrCode size={22} /> Show my entry code
+              </button>
+            )}
+            <div className="v-hint">
+              <Hand size={20} />
+              <span>Wear the bracelet on the hand you pick items with, and pick items for yourself only.</span>
+            </div>
+          </section>
+        )}
+
+        {(phase === "shopping" || phase === "leaving" || phase === "checkout") && cart && (
+          <>
+            {phase === "checkout" ? (
+              <section className="v-card v-leaving" aria-live="polite">
+                <span className="v-chip warn">
+                  <DoorOpen size={14} /> Checking out
                 </span>
-              </div>
+                <h1>Head to the exit</h1>
+                <p>
+                  Tap your bracelet on the exit reader{cart.exit_reader ? ` (${cart.exit_reader})` : ""} and hand it over. Your bill
+                  appears here as soon as the tap is verified.
+                </p>
+                <p className="v-total money">{money(cart.total_minor)}</p>
+                <button className="secondary" disabled={busy} onClick={() => action(() => call("/customer/checkout-request/withdraw", token, {}))}>
+                  Keep shopping
+                </button>
+              </section>
+            ) : phase === "leaving" ? (
+              <section className="v-card v-leaving" aria-live="polite">
+                <span className="v-chip warn">
+                  <DoorOpen size={14} /> Exit registered
+                </span>
+                <h1>Finishing your bill</h1>
+                <p className="muted">
+                  {pending
+                    ? `Staff are confirming ${pending} item${pending > 1 ? "s" : ""}. This usually takes under a minute.`
+                    : cart.exit_blockers?.length
+                      ? cart.exit_blockers[0]
+                      : "Bracelet verified. Adding up your basket…"}
+                </p>
+                <div className="v-progress" role="progressbar" aria-label="Preparing your bill">
+                  <span />
+                </div>
+              </section>
+            ) : (
+              <section className="v-card v-totalcard">
+                <div className="v-row">
+                  <span className="v-chip ok">
+                    <CheckCircle size={14} /> Shopping
+                  </span>
+                  {pattern && <span className="v-chip">{pattern} bracelet</span>}
+                </div>
+                <p className="v-label">Your basket</p>
+                <p className="v-total money">{money(cart.total_minor)}</p>
+                <p className="muted">{count ? `${count} item${count > 1 ? "s" : ""} confirmed` : "Items you pick up appear here in a few seconds."}</p>
+              </section>
+            )}
+            <section className="v-card">
               {cart.items.length ? (
                 cart.items.map((i) => (
-                  <div className="cartrow" key={i.product_id}>
+                  <div className="v-item" key={i.product_id}>
                     <ProductThumb productId={i.product_id} token={token} hasImage={i.has_image} />
-                    <div>
-                      <h3>{i.name}</h3>
-                      <span className="muted">
-                        {money(i.price_minor)} each · confirmed
+                    <div className="v-itemtext">
+                      <b>{i.name}</b>
+                      <span className="muted money">
+                        {money(i.price_minor)} × {i.quantity}
                       </span>
                     </div>
-                    <span className="quantity">× {i.quantity}</span>
-                    <b>{money(i.quantity * i.price_minor)}</b>
+                    <b className="money">{money(i.quantity * i.price_minor)}</b>
                   </div>
                 ))
               ) : (
-                <div className="empty">
-                  <ShoppingBag size={42} />
-                  <h3>Room for something good.</h3>
-                  <p>Confirmed pickups will appear here automatically.</p>
+                <div className="v-empty">
+                  <ShoppingBag size={40} />
+                  <b>Your basket is empty</b>
+                  <span className="muted">Pick something up and it's added here automatically.</span>
                 </div>
               )}
-              <p className="muted">
-                Cart version {cart.version}. Prices are set by the store.
-              </p>
+              {pending > 0 && (
+                <div className="v-pending">
+                  <Hourglass size={20} />
+                  <div>
+                    <b>
+                      Checking {pending} item{pending > 1 ? "s" : ""}
+                    </b>
+                    <span>Staff are confirming who picked {pending > 1 ? "them" : "it"} up. You're not charged until it's confirmed.</span>
+                  </div>
+                </div>
+              )}
             </section>
-          )}
-          {cart && cart.pending.length > 0 && (
-            <section className="pending">
-              <h2>
-                {cart.pending.length} interaction
-                {cart.pending.length > 1 ? "s" : ""} being reviewed
-              </h2>
-              <p>
-                These are separate from your confirmed basket. Staff will
-                reconcile them before payment.
-              </p>
-              {cart.pending.map((p) => (
-                <p key={p.id}>
-                  {p.tray_id} ·{" "}
-                  {p.reasons.join(", ").replaceAll("_", " ").toLowerCase()}
-                </p>
+            {phase === "shopping" &&
+              (cart.mode === "hardware" && cart.checkout_needs_tap ? (
+                <button className="v-primary" disabled={busy || !connected || !cart.bracelet} onClick={() => action(() => call("/customer/checkout-request", token, {}))}>
+                  Checkout <ArrowRight />
+                </button>
+              ) : cart.mode === "hardware" ? (
+                <div className="v-hint v-exit">
+                  <DoorOpen size={22} />
+                  <span>
+                    <b>Done?</b> Tap your bracelet on the exit reader. Your bill appears here.
+                  </span>
+                </div>
+              ) : (
+                <button
+                  className="v-primary"
+                  disabled={busy || !connected || pending > 0}
+                  onClick={() => action(() => call("/customer/checkout", token, { idempotency_key: crypto.randomUUID(), outcome: "SUCCESS" }))}
+                >
+                  Finish shopping <ArrowRight />
+                </button>
               ))}
-            </section>
-          )}
-        </main>
-        <aside className="summary panel">
-          <p className="eyebrow">VISIT SUMMARY</p>
-          <h2>
-            {cart?.status === "COMPLETE"
-              ? "You’re all set."
-              : "Your running total"}
-          </h2>
-          <div className="total">{money(cart?.total_minor || 0)}</div>
-          <div className="row">
-            <span>Confirmed items</span>
-            <b>{cart?.items.reduce((n, i) => n + i.quantity, 0) || 0}</b>
-          </div>
-          <div className="row">
-            <span>Pending review</span>
-            <b>{cart?.pending.length || 0}</b>
-          </div>
-          <div className="row">
-            <span>Bracelet</span>
-            <b>{cart?.bracelet?.id || "Not assigned"}</b>
-          </div>
-          <button
-            disabled={
-              busy ||
-              !connected ||
-              cart?.status !== "ACTIVE" ||
-              !!cart?.pending.length
-            }
-            onClick={() =>
-              action(() =>
-                call("/customer/checkout", token, {
-                  idempotency_key: crypto.randomUUID(),
-                  outcome: "SUCCESS",
-                }),
-              )
-            }
-          >
-            Finish simulated shop
-            <ArrowRight />
-          </button>
-          <p className="muted">
-            No money is collected. Emergency exit always stays open.
-          </p>
-          <button className="textbutton" onClick={() => setTab("receipt")}>
-            View receipt
-          </button>
-          <details ref={disputeBox}>
-            <summary>Dispute a confirmed interaction</summary>
-            <Dispute
-              key={disputeFor}
-              token={token}
-              preselect={disputeFor}
-              onDone={() => action(async () => {})}
-              events={cart?.confirmed_events || []}
-            />
+            {phase === "shopping" && cart.mode !== "hardware" && pending > 0 && (
+              <p className="muted v-note">You can finish once staff have checked the item above.</p>
+            )}
+          </>
+        )}
+
+        {phase === "bill" && cart && (
+          <section className="v-card v-bill">
+            <div className="v-row">
+              <span className="v-chip ok">
+                <CheckCircle size={14} /> Bill final
+              </span>
+              <span className="v-chip">Payment simulated</span>
+            </div>
+            <h1>Thanks for shopping</h1>
+            <p className="v-total money">{money(cart.receipt?.total_minor || 0)}</p>
+            <p className="muted">
+              {cart.receipt?.created ? new Date(cart.receipt.created * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : ""}
+              {cart.receipt?.order_id ? ` · Bill ${cart.receipt.order_id.slice(0, 8)}` : ""}
+            </p>
+            <div className="v-lines">
+              {(cart.receipt?.items || []).map((i: any) => (
+                <div className="v-line" key={i.product_id}>
+                  <span>
+                    {i.name} × {i.quantity}
+                  </span>
+                  <span className="money">{money(i.quantity * i.price_minor)}</span>
+                </div>
+              ))}
+              <div className="v-line v-sum">
+                <b>Total</b>
+                <b className="money">{money(cart.receipt?.total_minor || 0)}</b>
+              </div>
+            </div>
+            {cart.corrections.map((c: any) => (
+              <div className="v-pending" key={c.id}>
+                <Receipt size={20} />
+                <div>
+                  <b>Adjusted {money(c.amount_minor)}</b>
+                  <span>{c.reason}</span>
+                </div>
+              </div>
+            ))}
+            <p className="v-note">No payment provider is connected in this demo, so no money was collected.</p>
+            <div className="v-hint">
+              <Hand size={20} />
+              <span>Please hand your bracelet back to staff.</span>
+            </div>
+            <button className="v-primary" disabled={busy} onClick={handedOver}>
+              <DoorOpen size={22} /> Bracelet handed over · Exit
+            </button>
+            <p className="muted v-note">Takes you back to the start with a new entry code for your next visit.</p>
+          </section>
+        )}
+
+        {cart && cart.confirmed_events.length > 0 && (
+          <details className="v-card v-dispute" ref={disputeBox}>
+            <summary>Something here isn't yours?</summary>
+            <Dispute key={disputeFor} token={token} preselect={disputeFor} onDone={() => action(async () => {})} events={cart.confirmed_events} />
           </details>
-        </aside>
-      </div>
+        )}
+      </main>
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
           <div className="toast" key={t.id}>
             <span>
-              {t.action === "RETURN" ? "Put back" : "Added"}: <b>{t.name || t.product_id}</b>
+              {t.action === "RETURN" ? "Removed" : "Added"} <b>{t.name || t.product_id}</b>
               {t.quantity > 1 ? ` × ${t.quantity}` : ""}
             </span>
-            {t.weight_verified === false ? <span className="muted">Ask staff if this isn't yours</span> : <button
-              className="textbutton"
-              onClick={() => {
-                setDisputeFor(t.id);
-                if (disputeBox.current) disputeBox.current.open = true;
-                disputeBox.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-                dismissToast(t.id);
-              }}
-            >
-              Not mine?
-            </button>}
+            {t.weight_verified === false ? (
+              <span className="muted">Ask staff if this isn't yours</span>
+            ) : (
+              <button
+                className="textbutton"
+                onClick={() => {
+                  notMine(t.id);
+                  dismissToast(t.id);
+                }}
+              >
+                Not mine?
+              </button>
+            )}
           </div>
         ))}
       </div>
-      <footer>
-        ShelfFlow prototype <span>Continuous sensing · No shelf taps</span>
-      </footer>
-    </>
+    </div>
   );
 }
 function Dispute({
@@ -608,11 +579,12 @@ function Dispute({
 }
 
 const nav = [
-  ["Daily", [["Home", Storefront], ["Live camera", VideoCamera], ["Review queue", Camera], ["Shoppers & checkout", Users], ["Stock", Scales]]],
+  ["Daily", [["Front desk", DoorOpen], ["Home", Storefront], ["Live camera", VideoCamera], ["Review queue", Camera], ["Shoppers & checkout", Users], ["Stock", Scales]]],
   ["Products", [["Products & training", GraduationCap]]],
   ["Advanced", [["Insights", ChartLine], ["Shelf setup", Tray]]],
 ] as const;
 const intro: Record<string, string> = {
+  "Front desk": "Check shoppers in, see who is in the store, and check them out. On a phone, pick one column.",
   Home: "Everything at a glance. Click a tile to go where it needs you.",
   "Live camera": "Watch the shelf live, with or without the recognition boxes.",
   "Review queue": "Things the shelf could not settle on its own. Pick one on the left, decide on the right.",
@@ -665,6 +637,9 @@ export function Staff() {
       return () => clearInterval(t);
     }
   }, [token]);
+  // Pushed live weight (fresh for 10 s after the last message) and an immediate reload after each change.
+  const live = useStaffSocket(token, reload);
+  const view = data && { ...data, live_weight: Date.now() - live.at < 10000 ? live.trays : {} };
   const camera = useCameraStatus(token);
   const action = async (path: string, body: unknown) => {
     setError("");
@@ -723,21 +698,17 @@ export function Staff() {
             <p>Connecting to store…</p>
           ) : (
             <>
-              {page === "Home" && <Home data={data} token={token} action={action} camera={camera} go={go} />}
-              {page === "Live camera" && <LiveCamera data={data} token={token} go={go} />}
-              {page === "Review queue" && <ReviewQueue data={data} token={token} action={action} reload={reload} />}
-              {page === "Shoppers & checkout" && <ShoppersPage data={data} token={token} action={action} />}
-              {page === "Stock" &&
-                (data.weights_enabled === false ? (
-                  <Preintegration data={data} token={token} action={action} stockOnly />
-                ) : (
-                  <TrayLoading data={data} action={action} token={token} />
-                ))}
+              {page === "Front desk" && <FrontDesk data={view} token={token} action={action} go={go} />}
+              {page === "Home" && <Home data={view} token={token} action={action} camera={camera} go={go} />}
+              {page === "Live camera" && <LiveCamera data={view} token={token} go={go} />}
+              {page === "Review queue" && <ReviewQueue data={view} token={token} action={action} reload={reload} />}
+              {page === "Shoppers & checkout" && <ShoppersPage data={view} token={token} action={action} />}
+              {page === "Stock" && <StockPage data={view} token={token} action={action} />}
               {page === "Products & training" && (
-                <ProductsHub data={data} token={token} action={action} tab={route.tab || "catalogue"} product={route.product} go={go} />
+                <ProductsHub data={view} token={token} action={action} tab={route.tab || "catalogue"} product={route.product} go={go} />
               )}
-              {page === "Insights" && <Insights data={data} action={action} token={token} />}
-              {page === "Shelf setup" && <Setup data={data} action={action} token={token} />}
+              {page === "Insights" && <Insights data={view} action={action} token={token} />}
+              {page === "Shelf setup" && <Setup data={view} action={action} token={token} />}
             </>
           )}
         </main>
@@ -805,6 +776,7 @@ function ShoppersPage({ data, token, action }: { data: any; token: string; actio
       )}
       {tab === "visits" && (
         <>
+          <ExitCheckout data={data} token={token} action={action} />
           <section className="panel">
             <h2>Visits</h2>
             {data.sessions.length === 0 && <p className="muted">No visits yet.</p>}
@@ -982,8 +954,8 @@ function Gate({ data, action }: { token: string; data: any; action: Action }) {
     try {
       controls.current = await new (
         await import("@zxing/browser")
-      ).BrowserQRCodeReader().decodeFromVideoDevice(
-        undefined,
+      ).BrowserQRCodeReader().decodeFromConstraints(
+        { video: { facingMode: "environment" } },
         video.current!,
         (r) => {
           if (r) {
@@ -1110,7 +1082,8 @@ function CheckIn({ data, action }: { data: any; action: Action }) {
   const video = useRef<HTMLVideoElement>(null);
   const controls = useRef<IScannerControls | null>(null);
   useEffect(() => () => controls.current?.stop(), []);
-  const tap = since > 0 ? data.recent_taps?.find((t: any) => t.captured >= since) : null;
+  const entry = data.rfid_roles?.entry;
+  const tap = since > 0 ? data.recent_taps?.find((t: any) => t.captured >= since && (!entry || t.reader === entry)) : null;
   const bracelet = tap && data.bracelets.find((b: any) => b.rfid === tap.uid);
   async function identify(value: string) {
     setToken(value); setWho(null); setDone(null); setError("");
@@ -1122,7 +1095,7 @@ function CheckIn({ data, action }: { data: any; action: Action }) {
   async function scan() {
     setScanning(true); setError("");
     try {
-      controls.current = await new (await import("@zxing/browser")).BrowserQRCodeReader().decodeFromVideoDevice(undefined, video.current!, (r) => {
+      controls.current = await new (await import("@zxing/browser")).BrowserQRCodeReader().decodeFromConstraints({ video: { facingMode: "environment" } }, video.current!, (r) => {
         if (r) { controls.current?.stop(); setScanning(false); identify(r.getText()); }
       });
     } catch (e) { setError(String(e)); setScanning(false); }
@@ -1132,7 +1105,7 @@ function CheckIn({ data, action }: { data: any; action: Action }) {
       <h2>Check in a customer</h2>
       <ol className="steps">
         <li><b>Scan</b> the entry QR on the customer's phone.</li>
-        <li><b>Tap</b> the bracelet you are handing over on a shelf RFID reader.</li>
+        <li><b>Tap</b> the bracelet you are handing over on the entry reader{data.rfid_roles?.entry ? ` (${data.rfid_roles.entry})` : ""}.</li>
         <li><b>Assign</b>: the visit starts and the customer's cart turns on.</li>
       </ol>
       <video ref={video} className="scanner" muted playsInline />
@@ -1148,7 +1121,7 @@ function CheckIn({ data, action }: { data: any; action: Action }) {
       {who && !done && (
         <div className="result">
           <p>Customer: <b>{who.customer_alias || "Shopper"}</b> · QR valid for {who.expires_in} s more.</p>
-          {!tap ? <p>Now tap the bracelet on a shelf reader…</p> : !bracelet ? (
+          {!tap ? <p>Now tap the bracelet on the entry reader{entry ? ` (${entry})` : ""}…</p> : !bracelet ? (
             <p className="error">Tag {tap.uid} is not a registered bracelet. Register it below first.</p>
           ) : (
             <>
@@ -1163,6 +1136,281 @@ function CheckIn({ data, action }: { data: any; action: Action }) {
       )}
       {done && <Notice>Visit started: bracelet {done.bracelet_id} ({patternOf(done.markers)}). The customer's cart is now active.</Notice>}
     </section>
+  );
+}
+
+/** Exit: find the visit (bracelet tap or list), check the cart, check out once, then take the bracelet back. */
+function ExitCheckout({ data, token, action, pick }: { data: any; token: string; action: Action; pick?: { sid: string; at: number } }) {
+  const [sid, setSid] = useState(""), [since, setSince] = useState(0), [visit, setVisit] = useState<any>(null), [error, setError] = useState(""),
+    [busy, setBusy] = useState(false), [cleaned, setCleaned] = useState(true);
+  const active = data.sessions.filter((x: any) => x.status === "ACTIVE");
+  const exitReader = data.rfid_roles?.exit;
+  const waiting: any[] = data.pending_exits || [];
+  const tap = since > 0 ? data.recent_taps?.find((t: any) => t.captured >= since && (!exitReader || t.reader === exitReader)) : null;
+  const tapped = tap && data.bracelets.find((b: any) => b.rfid === tap.uid);
+  useEffect(() => { if (tapped?.session_id && tapped.session_id !== sid) setSid(tapped.session_id); }, [tapped?.session_id]);
+  // A customer tapped the exit reader but the bill is blocked: open that visit so staff can see why.
+  useEffect(() => { if (!sid && waiting.length) setSid(waiting[0].session_id); }, [waiting[0]?.session_id]);
+  useEffect(() => {
+    if (!sid) { setVisit(null); return; }
+    call(`/staff/visits/${encodeURIComponent(sid)}`, token).then(setVisit).catch((e) => setError(String(e.message || e)));
+  }, [sid, data]);
+  useEffect(() => { if (pick?.sid) setSid(pick.sid); }, [pick?.at]);
+  const bracelet = visit?.bracelet && data.bracelets.find((b: any) => b.id === visit.bracelet.id);
+  const blockers: any[] = visit?.exit_blockers || [];
+  async function run(fn: () => Promise<any>) {
+    setBusy(true); setError("");
+    try { await fn(); setVisit(await call(`/staff/visits/${encodeURIComponent(sid)}`, token)); }
+    catch (e: any) { setError(String(e.message || e)); }
+    finally { setBusy(false); }
+  }
+  return (
+    <section className="panel">
+      <h2>Check out at the exit</h2>
+      <ol className="steps">
+        <li><b>Exit tap</b>: the customer taps the bracelet on the exit reader{exitReader ? ` (${exitReader})` : ""}. With nothing pending the bill is generated at once; otherwise the visit waits here.</li>
+        <li><b>Or by hand</b>: find the visit (tap or list), check the cart with the customer, then generate the bill (once; repeating it shows the same bill).</li>
+        <li><b>Take back</b> the bracelet: it is only released for the next customer after you confirm it.</li>
+      </ol>
+      <div className="actions">
+        <button className="secondary" onClick={() => { setSince(Date.now() / 1000); setError(""); }}>Find by bracelet tap</button>
+        <select value={sid} onChange={(e) => { setSid(e.target.value); setError(""); }}>
+          <option value="">…or choose an active visit</option>
+          {active.map((x: any) => <option key={x.id} value={x.id}>{x.customer_alias || x.id.slice(0, 8)}</option>)}
+        </select>
+      </div>
+      {waiting.map((w: any) => (
+        <p key={w.session_id} className={w.blockers.length ? "error" : ""}>
+          <b>{w.customer_alias || "Shopper"}</b> tapped out with {w.bracelet_id}{w.blockers.length ? `: waiting (${w.blockers.map((b: any) => b.message).join("; ")})` : ": billing…"}
+          {w.session_id !== sid && <button className="textbutton" onClick={() => setSid(w.session_id)}>Open</button>}
+        </p>
+      ))}
+      {since > 0 && !tap && <p>Tap the customer's bracelet on the exit reader{exitReader ? ` (${exitReader})` : ""}…</p>}
+      {tap && !tapped && <p className="error">Tag {tap.uid} is not a registered bracelet.</p>}
+      {tapped && !tapped.session_id && <p className="error">{tapped.id} is not assigned to a visit.</p>}
+      {error && <p className="error">{error}</p>}
+      {visit && (
+        <div className="result">
+          <p><b>{visit.customer_alias || "Shopper"}</b> · {visit.status.toLowerCase()} · bracelet {visit.bracelet ? `${visit.bracelet.id} (${patternOf(visit.bracelet.markers)})` : "none"}</p>
+          {visit.items.length === 0 ? <p className="muted">Cart is empty.</p> : visit.items.map((i: any) => (
+            <div className="row" key={i.product_id}><span>{i.quantity} × {i.name}</span><b>{money(i.quantity * i.price_minor)}</b></div>
+          ))}
+          <div className="row"><span>Total</span><b>{money(visit.total_minor)}</b></div>
+          {visit.status === "ACTIVE" && blockers.map((b: any) => (
+            <p className="error" key={b.code}>{b.message}{b.wait_s ? ` (about ${b.wait_s} s)` : ""}.</p>
+          ))}
+          {visit.status === "ACTIVE" && (
+            <button disabled={busy || blockers.length > 0} onClick={() => run(() => action("/staff/exit", { session_id: sid }))}>
+              Check out and generate bill
+            </button>
+          )}
+          {visit.status === "COMPLETE" && (
+            <>
+              <Notice>Bill final: {money(visit.receipt?.total_minor || 0)}. Payment is SIMULATED: no payment provider is connected, so no money was collected. The customer's app shows the bill.</Notice>
+              {bracelet?.session_id === sid ? (
+                <>
+                  <label><input type="checkbox" checked={cleaned} onChange={(e) => setCleaned(e.target.checked)} /> Bracelet cleaned</label>
+                  <button className="secondary" disabled={busy}
+                    onClick={() => run(() => action(`/staff/bracelets/${bracelet.id}/return`, { reason: cleaned ? "Returned at exit and cleaned" : "Returned at exit, needs cleaning", cleaned }))}>
+                    Bracelet {bracelet.id} is back: {cleaned ? "release it for the next customer" : "keep it until cleaned"}
+                  </button>
+                </>
+              ) : <p className="muted">Bracelet returned.</p>}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Stock: the catalogue with what is on the shelf now, plus the counting/loading tools. */
+function StockPage({ data, token, action }: { data: any; token: string; action: Action }) {
+  const [tab, setTab] = useState("catalogue");
+  return (
+    <>
+      <Tabs tabs={[["catalogue", "Catalogue"], ["count", data.weights_enabled === false ? "Count stock" : "Load a tray"]]} value={tab} onChange={setTab} />
+      {tab === "catalogue" ? (
+        <ShelfCatalogue token={token} />
+      ) : data.weights_enabled === false ? (
+        <Preintegration data={data} token={token} action={action} stockOnly />
+      ) : (
+        <TrayLoading data={data} action={action} token={token} />
+      )}
+    </>
+  );
+}
+
+function ShelfCatalogue({ token }: { token: string }) {
+  const [stock, setStock] = useState<any>(null),
+    [filter, setFilter] = useState("all"),
+    [query, setQuery] = useState(""),
+    [error, setError] = useState(""),
+    [photoVersion, setPhotoVersion] = useState<Record<string, number>>({});
+  useEffect(() => {
+    let stop = false,
+      timer: ReturnType<typeof setTimeout>;
+    // Ask again only after the last answer: with the camera offline one answer can take ~2 s.
+    const load = () =>
+      call("/staff/shelf-stock", token)
+        .then((r) => {
+          if (!stop) {
+            setStock(r);
+            setError("");
+          }
+        })
+        .catch((e) => {
+          if (!stop) setError(String(e.message || e));
+        })
+        .finally(() => {
+          if (!stop) timer = setTimeout(load, 2000);
+        });
+    load();
+    return () => {
+      stop = true;
+      clearTimeout(timer);
+    };
+  }, [token]);
+  if (!stock) return <p className="muted">{error || "Loading the catalogue…"}</p>;
+  const items: any[] = stock.items;
+  const inStock = items.filter((i) => i.stock > 0).length;
+  const shown = items
+    .filter((i) => filter === "all" || (filter === "in" ? i.stock > 0 : i.stock === 0))
+    .filter((i) => !query.trim() || i.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const ago = (t: number | null) => {
+    if (!t) return "Not seen yet";
+    const sec = Math.max(0, Math.round(stock.checked - t));
+    if (sec < 60) return `Seen ${sec} s ago`;
+    if (sec < 3600) return `Seen ${Math.round(sec / 60)} min ago`;
+    return `Seen at ${new Date(t * 1000).toLocaleTimeString([], { timeStyle: "short" })}`;
+  };
+  return (
+    <section className="catalogue">
+      <div className="cat-summary">
+        <div className="cat-stat">
+          <span>Products</span>
+          <b>{items.length}</b>
+        </div>
+        <div className="cat-stat ok">
+          <span>In stock</span>
+          <b>{inStock}</b>
+        </div>
+        <div className="cat-stat out">
+          <span>Out of stock</span>
+          <b>{items.length - inStock}</b>
+        </div>
+        <div className={stock.camera_live ? "cat-stat" : "cat-stat warn"}>
+          <span>Shelf camera</span>
+          <b className="cat-live">
+            <span className={stock.camera_live ? "dot ok" : "dot bad"} /> {stock.camera_live ? "Live" : "Offline"}
+          </b>
+        </div>
+      </div>
+      {!stock.camera_live && <Notice>The shelf camera is offline, so stock shows what was last seen. It updates again once the camera is back.</Notice>}
+      <div className="cat-tools">
+        <div className="seg" role="tablist" aria-label="Filter products">
+          {[["all", "All"], ["in", "In stock"], ["out", "Out of stock"]].map(([k, label]) => (
+            <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "selected" : ""} onClick={() => setFilter(k)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <input type="search" placeholder="Search products" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search products" />
+      </div>
+      {shown.length === 0 ? (
+        <p className="muted">{items.length ? "No products match." : "No products yet. Add one under Products."}</p>
+      ) : (
+        <ul className="cat-grid">
+          {shown.map((i) => (
+            <li key={i.product_id} className={i.stock > 0 ? "in" : "out"}>
+              <div className="cat-img">
+                {i.has_image || photoVersion[i.product_id] ? (
+                  <AuthImage path={`/staff/product-image/${encodeURIComponent(i.product_id)}?v=${photoVersion[i.product_id] || 0}`} token={token} alt="" />
+                ) : (
+                  <ShoppingBag size={32} />
+                )}
+              </div>
+              <div className="cat-body">
+                <b>{i.name}</b>
+                <span className="muted money">{i.price_minor != null ? money(i.price_minor) : "No price set"}</span>
+              </div>
+              <div className="cat-foot">
+                <span className={i.stock > 0 ? "v-chip ok" : "v-chip out"}>{i.stock > 0 ? `${i.stock} in stock` : "Out of stock"}</span>
+                <small className="muted">{i.source === "scale" ? "Weighed on the tray" : ago(i.last_seen)}</small>
+                {i.in_catalogue && (
+                  <PhotoButton productId={i.product_id} token={token} hasPhoto={i.has_image}
+                    onDone={() => setPhotoVersion((v) => ({ ...v, [i.product_id]: Date.now() }))} />
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Front desk: the three jobs at the door side by side (a phone shows one at a time). */
+function FrontDesk({ data, token, action, go }: { data: any; token: string; action: Action; go: Go }) {
+  const [column, setColumn] = useState(() => sessionStorage.getItem("frontdesk-column") || "checkin"),
+    [pick, setPick] = useState<{ sid: string; at: number } | undefined>();
+  const visits: any[] = data.active_visits || [];
+  const waiting: any[] = data.pending_exits || [];
+  const choose = (c: string) => {
+    setColumn(c);
+    try { sessionStorage.setItem("frontdesk-column", c); } catch {}
+  };
+  const columns: [string, string, number][] = [["checkin", "Check in", 0], ["instore", "In store", visits.length], ["exit", "Exit", waiting.length]];
+  return (
+    <div className="frontdesk">
+      <div className="fd-switch" role="tablist" aria-label="Front desk column">
+        {columns.map(([key, label, n]) => (
+          <button key={key} role="tab" aria-selected={column === key} className={column === key ? "selected" : ""} onClick={() => choose(key)}>
+            {label}{n > 0 && <span className="count">{n}</span>}
+          </button>
+        ))}
+      </div>
+      <div className={`fd-grid show-${column}`}>
+        <div className="fd-col fd-checkin"><CheckIn data={data} action={action} /></div>
+        <div className="fd-col fd-instore">
+          <section className="panel">
+            <h2>In store <span className="fd-n">{visits.length}</span></h2>
+            {data.unowned_pending > 0 && (
+              <button className="v-pending fd-unowned" onClick={() => go("Review queue")}>
+                <Hourglass size={18} />
+                <span><b>{data.unowned_pending} shelf event{data.unowned_pending > 1 ? "s" : ""} with no shopper yet.</b> Decide who it was before checking anyone out.</span>
+              </button>
+            )}
+            {visits.length === 0 ? <p className="muted">Nobody is shopping right now.</p> : (
+              <ul className="fd-visits">
+                {visits.map((v) => {
+                  const pattern = (v.bracelet?.markers || []).map((m: number) => PATTERNS[m]).filter(Boolean).join(", ");
+                  return (
+                    <li key={v.session_id} className={v.exit_requested ? "leaving" : ""}>
+                      <div className="fd-who">
+                        <b>{v.customer_alias || "Shopper"}</b>
+                        <span className="muted">{v.bracelet ? `${v.bracelet.id}${pattern ? ` · ${pattern}` : ""}` : "No bracelet"}</span>
+                      </div>
+                      <div className="fd-what">
+                        <b className="money">{money(v.total_minor)}</b>
+                        <span className="muted">{v.items} item{v.items === 1 ? "" : "s"}</span>
+                      </div>
+                      <div className="fd-flags">
+                        {v.exit_requested ? <span className="v-chip warn">At the exit</span>
+                          : v.checkout_requested && <span className="v-chip">Heading to exit</span>}
+                        {v.pending > 0 && <button className="v-chip warn fd-link" onClick={() => go("Review queue")}>{v.pending} to check</button>}
+                        <button className="secondary fd-out" onClick={() => { setPick({ sid: v.session_id, at: Date.now() }); choose("exit"); }}>Check out</button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        </div>
+        <div className="fd-col fd-exit"><ExitCheckout data={data} token={token} action={action} pick={pick} /></div>
+      </div>
+    </div>
   );
 }
 
@@ -1267,6 +1515,7 @@ export function Simulation({ data, action }: { data: any; action: Action }) {
     </div>
   );
 }
+const FORM_TITLES: Record<string, string> = { "Tray ROI": "Tray region", Calibration: "Scale calibration", Restock: "Restock", Product: "Product details" };
 function JsonForm({
   label,
   initial,
@@ -1320,6 +1569,7 @@ function JsonForm({
   }
   return (
     <form
+      className="setupform"
       onSubmit={async (e) => {
         e.preventDefault();
         setBusy(true);
@@ -1340,6 +1590,7 @@ function JsonForm({
         }
       }}
     >
+      <h3 className="formtitle">{FORM_TITLES[label] || label}</h3>
       {Object.keys(initial)
         .filter((key) => key !== "idempotency_key")
         .map((key) => (
@@ -1385,9 +1636,9 @@ function JsonForm({
           </label>
         ))}
       <button className="secondary" disabled={busy}>
-        {busy ? "Saving…" : `Save ${label.toLowerCase()}`}
+        {busy ? "Saving…" : `Save ${(FORM_TITLES[label] || label).toLowerCase()}`}
       </button>
-      {error && <p role="status">{error}</p>}
+      {error && <p role="status" className={error === "Saved" ? "formok" : "error"}>{error}</p>}
     </form>
   );
 }
@@ -1409,18 +1660,16 @@ function Setup({
       </Notice>
       {data.trays.map((t: any) => (
         <section className="panel" key={t.id}>
-          <h2>
-            {t.id} · {t.unit_tracking ? "mixed products (load via Tray loading)" : t.product_id}
-          </h2>
+          <div className="setuphead">
+            <h2>{t.id.replace("tray-", "Tray ").toUpperCase().replace("TRAY ", "Tray ")}</h2>
+            <span className="v-chip">{t.unit_tracking ? "Mixed products" : t.product_id}</span>
+            <span className="v-chip">Calibration {t.calibration_version}</span>
+          </div>
           {t.latest_sample ? (
-            <div className="row">
-              <span>Live raw reading: {t.latest_sample.weight.raw}</span>
-              <span>
-                Filtered: {t.latest_sample.weight.filtered ?? "Uncalibrated"} g
-              </span>
-              <span>
-                {t.latest_sample.health.flags.join(", ") || "No reported flags"}
-              </span>
+            <div className="readout">
+              <div><span>Raw reading</span><b className="money">{t.latest_sample.weight.raw}</b></div>
+              <div><span>Weight</span><b className="money">{t.latest_sample.weight.filtered ?? "—"} g</b></div>
+              <div><span>Scale health</span><b>{t.latest_sample.health.flags.join(", ") || "OK"}</b></div>
             </div>
           ) : (
             <p className="muted">
@@ -1507,7 +1756,7 @@ export function ReviewCard({
       <h3>
         {h.tray_id} · {h.proposal.action || "Unresolved observation"}
       </h3>
-      <p>{h.reason.join(" · ").replaceAll("_", " ").toLowerCase()}</p>
+      <p>{h.reason.map(reasonText).join(" · ")}</p>
       <code>{h.id}</code>
       <button
         className="textbutton"
@@ -1723,6 +1972,222 @@ function CatalogueImage({ name, token, alt }: { name: string; token: string; alt
   }, [name, token]);
   return url ? <img className="loadphoto" src={url} alt={alt} /> : <div className="loadphoto empty-photo">No image</div>;
 }
+/** Guided loading: staff list what goes on the tray, then place items one at a time. The shelf LCD
+ *  shows the same direction ("2/6 Vicks", live weight), each settled increase is saved as that item's
+ *  weight and stock, and the next item is asked for automatically. */
+type PlanItem = { product_id: string; name: string };
+type RunState = "placing" | "saving" | "problem" | "done";
+
+function GuidedLoad({ data, token, action, tray, load, still }: {
+  data: any; token: string; action: Action; tray: any; load: any; still: (loadId: string) => Promise<string>;
+}) {
+  const [counts, setCounts] = useState<Record<string, number>>(() => Object.fromEntries(data.products.map((p: any) => [p.id, 1]))),
+    [plan, setPlan] = useState<PlanItem[] | null>(null),
+    [index, setIndex] = useState(0),
+    [state, setState] = useState<RunState>("placing"),
+    [since, setSince] = useState(0),
+    [before, setBefore] = useState(""),
+    [saved, setSaved] = useState<any[]>([]),
+    [problem, setProblem] = useState(""),
+    [warning, setWarning] = useState(""),
+    [lcd, setLcd] = useState<string[]>([]),
+    [simGrams, setSimGrams] = useState(50),
+    [busy, setBusy] = useState(false);
+  const simulation = data.mode === "simulation";
+  const live = trayWeight(data, tray?.id);
+  const loaded = data.tray_units.filter((u: any) => u.load_id === load.id);
+  const product = (id: string) => data.products.find((p: any) => p.id === id)?.name || id;
+  const item = plan?.[index];
+  const total = plan?.length || 0;
+
+  async function guide(lines: string[], seconds = 120) {
+    setLcd(lines);
+    try {
+      await call(`/staff/trays/${tray.id}/lcd`, token, { lines, seconds });
+    } catch {
+      /* the app still shows the direction if the shelf screen cannot be reached */
+    }
+  }
+  async function begin(next: number, items = plan) {
+    const target = items?.[next];
+    if (!target) return;
+    setIndex(next);
+    setProblem("");
+    setWarning("");
+    setState("placing");
+    setBefore(await still(load.id));
+    setSince(Date.now() / 1000 - 1);
+    await guide([`${next + 1}/${items!.length} ${target.name}`, "place, wait #"]);
+  }
+  async function start() {
+    const items: PlanItem[] = data.products.flatMap((p: any) => Array.from({ length: counts[p.id] || 0 }, () => ({ product_id: p.id, name: p.name })));
+    if (!items.length) return;
+    setPlan(items);
+    setSaved([]);
+    await begin(0, items);
+  }
+  async function stop() {
+    setPlan(null);
+    setState("placing");
+    await guide([], 0);
+  }
+  // Keep the shelf screen alive while waiting (each request lasts 120 s).
+  useEffect(() => {
+    if (!plan || state !== "placing" || !item) return;
+    const t = setInterval(() => guide([`${index + 1}/${total} ${item.name}`, "place, wait #"]), 60000);
+    return () => clearInterval(t);
+  }, [plan, state, index]);
+  // Wait for the settled weight increase of this item, then save it straight away.
+  useEffect(() => {
+    if (!plan || state !== "placing" || !item) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const events: WeightEvent[] = await call(`/staff/trays/${tray.id}/weight-events?since=${since}`, token);
+        const fresh = events.filter((e) => e.capture_end >= since);
+        const falling = fresh.find((e) => e.delta_g < 0);
+        if (falling && !stopped) {
+          setWarning(`Weight went down by ${Math.abs(falling.delta_g).toFixed(1)} g. Put back anything taken off; nothing should leave the tray while loading.`);
+          guide(["WEIGHT WENT DOWN", "put item back"], 30);
+        }
+        const rising = fresh.find((e) => e.delta_g > 0);
+        if (!rising || stopped) return;
+        stopped = true;
+        setState("saving");
+        const after = await still(load.id);
+        try {
+          const r = await action(`/staff/loads/${load.id}/units`, {
+            product_id: item.product_id, weight_event_id: rising.event_id, spot: null, crop_refs: [before, after].filter(Boolean),
+          });
+          setSaved((s) => [...s, { ...r, name: item.name }]);
+          if (index + 1 < total) {
+            await guide([`SAVED ${r.weight_g.toFixed(1)}g`, `next: ${plan[index + 1].name}`], 3);
+            await new Promise((ok) => setTimeout(ok, 2500));
+            await begin(index + 1);
+          } else {
+            setState("done");
+            await guide(["LOADING DONE", `${total} items saved`], 30);
+          }
+        } catch (e: any) {
+          setProblem(String(e.message || e));
+          setState("problem");
+          await guide(["CHECK THE APP", item.name], 120);
+        }
+      } catch (e: any) {
+        setProblem(String(e.message || e));
+      }
+    };
+    poll();
+    const t = setInterval(poll, 1000);
+    return () => {
+      stopped = true;
+      clearInterval(t);
+    };
+  }, [plan, state, index, since]);
+
+  const planned = data.products.reduce((n: number, p: any) => n + (counts[p.id] || 0), 0);
+  return (
+    <div className="wizardstep guided">
+      {!plan ? (
+        <>
+          <h3>What goes on the tray?</h3>
+          <p className="muted">Set how many of each product you'll place. You'll place them one at a time and the shelf screen tells you which one is next.</p>
+          <ul className="planlist">
+            {data.products.map((p: any) => (
+              <li key={p.id}>
+                <span>{p.name}</span>
+                <div className="stepper" aria-label={`How many ${p.name}`}>
+                  <button className="secondary" aria-label={`One less ${p.name}`} onClick={() => setCounts({ ...counts, [p.id]: Math.max(0, (counts[p.id] || 0) - 1) })}>−</button>
+                  <b className="money">{counts[p.id] || 0}</b>
+                  <button className="secondary" aria-label={`One more ${p.name}`} onClick={() => setCounts({ ...counts, [p.id]: Math.min(20, (counts[p.id] || 0) + 1) })}>+</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <button className="v-primary" disabled={busy || planned === 0} onClick={() => { setBusy(true); start().finally(() => setBusy(false)); }}>
+            Start loading {planned} item{planned === 1 ? "" : "s"}
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="loadprogress" aria-label={`${saved.length} of ${total} saved`}>
+            {plan.map((p, i) => (
+              <span key={i} className={i < saved.length ? "done" : i === index && state !== "done" ? "current" : ""} title={p.name} />
+            ))}
+          </div>
+          {state === "done" ? (
+            <div className="loadcard done" role="status">
+              <CheckCircle size={28} />
+              <div>
+                <b>All {total} items saved</b>
+                <span>Each one's weight is recorded and it counts as stock on {tray.id}.</span>
+              </div>
+            </div>
+          ) : (
+            <div className={`loadcard ${state}`} aria-live="polite">
+              <span className="loadstep">Item {index + 1} of {total}</span>
+              <b className="loadname">{item?.name}</b>
+              <span>
+                {state === "placing" && "Place it on the tray, then take your hands away. It's saved once the weight settles."}
+                {state === "saving" && "Weight settled. Saving…"}
+                {state === "problem" && "This item couldn't be saved."}
+              </span>
+              <p className="weightreadout">
+                <Scales size={24} />
+                {live ? `${live.live.toFixed(1)} g on tray` : "Waiting for the tray reading…"}
+              </p>
+            </div>
+          )}
+          {lcd.length > 0 && (
+            <div className="lcdmirror" aria-label="Shelf screen shows">
+              <small>Shelf screen</small>
+              <code>{(lcd[0] || "").padEnd(16).slice(0, 16)}</code>
+              <code>{(lcd[1] || "").replace("#", live ? `${live.live.toFixed(1)}g` : "--").padEnd(16).slice(0, 16)}</code>
+            </div>
+          )}
+          {warning && <Notice>{warning}</Notice>}
+          {problem && <p className="error" role="alert">{problem}</p>}
+          {state === "problem" && (
+            <div className="actions">
+              <button onClick={() => begin(index)}>Try this item again</button>
+              <button className="secondary" onClick={() => (index + 1 < total ? begin(index + 1) : stop())}>Skip it</button>
+            </div>
+          )}
+          {simulation && state === "placing" && (
+            <div className="simrow">
+              <label>
+                Simulated item weight (g)
+                <input type="number" step="any" value={simGrams} onChange={(e) => setSimGrams(Number(e.target.value))} />
+              </label>
+              <button className="secondary" onClick={() => call("/staff/simulation/weight", token, { tray_id: tray.id, delta_g: simGrams })}>Simulate placing it</button>
+            </div>
+          )}
+          {saved.length > 0 && (
+            <ul className="savedlist">
+              {saved.map((s, i) => (
+                <li key={i}>
+                  <CheckCircle size={16} /> {s.name} <b className="money">{s.weight_g.toFixed(1)} g</b>
+                  {s.warnings?.length > 0 && <span className="lowstock">similar weight to {product(s.warnings[0].product_id)}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="actions">
+            {state !== "done" && <button className="textbutton" onClick={stop}>Stop guided loading</button>}
+            {state === "done" && <button className="secondary" onClick={() => setPlan(null)}>Load more</button>}
+          </div>
+        </>
+      )}
+      <h3>Loaded in this session ({loaded.length})</h3>
+      <UnitTable units={loaded} product={product} action={action} />
+      <button className="secondary" disabled={!!plan && state !== "done"}
+        onClick={async () => { await action(`/staff/loads/${load.id}/close`, {}); await guide([], 0); setPlan(null); }}>
+        Finish loading
+      </button>
+    </div>
+  );
+}
+
 function TrayLoading({ data, action, token }: { data: any; action: Action; token: string }) {
   const [trayId, setTrayId] = useState(data.trays[0]?.id || ""),
     [reason, setReason] = useState(""),
@@ -1810,7 +2275,7 @@ function TrayLoading({ data, action, token }: { data: any; action: Action; token
     <>
       <section className="panel">
         <div className="sectionhead">
-          <h2>Load a mixed-product tray</h2>
+          <h2>Load the tray</h2>
           <label className="inline">
             Tray
             <select value={trayId} onChange={(e) => { setTrayId(e.target.value); resetItem(); setResult(null); }}>
@@ -1820,10 +2285,9 @@ function TrayLoading({ data, action, token }: { data: any; action: Action; token
             </select>
           </label>
         </div>
-        <p>
-          Each item is weighed on its own as you place it: the weight it adds becomes that item's fingerprint, and
-          camera stills are saved with it. Place items one at a time and keep hands off the tray until the weight
-          settles. The scale is never zeroed; each weight is the difference between two stable readings.
+        <p className="muted">
+          Place items one at a time. Each one is weighed as it goes on, so the shelf knows exactly what it holds,
+          and the shelf screen tells you which item to place next.
         </p>
         {error && <p role="alert" className="error">{error}</p>}
         {!tray ? null : !tray.unit_tracking ? (
@@ -1866,127 +2330,7 @@ function TrayLoading({ data, action, token }: { data: any; action: Action; token
             </button>
           </div>
         ) : (
-          <div className="wizardstep">
-            <h3>Step 3 · Add items one by one</h3>
-            <ol className="steps">
-              <li className={step === "choose" ? "current" : "done"}>Choose product</li>
-              <li className={step === "waiting" ? "current" : step === "review" ? "done" : ""}>Place one item</li>
-              <li className={step === "review" ? "current" : ""}>Check and save</li>
-            </ol>
-            {step === "choose" && (
-              <>
-                <div className="setupgrid">
-                  <label>
-                    Product
-                    <select value={productId} onChange={(e) => setProductId(e.target.value)}>
-                      {data.products.map((p: any) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Spot on tray (optional)
-                    <select value={spot} onChange={(e) => setSpot(e.target.value)}>
-                      <option value="">Not specified</option>
-                      {[0, 1, 2, 3, 4, 5].map((n) => (
-                        <option key={n} value={n} disabled={usedSpots.has(n)}>
-                          Spot {n + 1}{usedSpots.has(n) ? " (occupied)" : ""}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <button disabled={busy || !productId}
-                  onClick={() => run(async () => {
-                    setResult(null);
-                    setBefore(await still(load.id));
-                    setSince(Date.now() / 1000 - 2);
-                    setStep("waiting");
-                  })}>
-                  Ready — I will place one {product(productId)}
-                </button>
-              </>
-            )}
-            {step === "waiting" && (
-              <div className="waiting">
-                <p className="weightreadout">
-                  <Scales size={28} />
-                  {live?.filtered != null ? `${Number(live.filtered).toFixed(1)} g on tray` : "Waiting for the tray reading…"}
-                </p>
-                <p>
-                  Place <b>one {product(productId)}</b>{spot !== "" ? ` in spot ${Number(spot) + 1}` : ""} now, then take your
-                  hands away. The item is recorded as soon as the weight settles.
-                </p>
-                {ignored && <Notice>{ignored}</Notice>}
-                {simulation && (
-                  <div className="simrow">
-                    <label>
-                      Simulated item weight (g)
-                      <input type="number" step="any" value={simGrams} onChange={(e) => setSimGrams(Number(e.target.value))} />
-                    </label>
-                    <button className="secondary" disabled={busy}
-                      onClick={() => run(async () => { await call("/staff/simulation/weight", token, { tray_id: trayId, delta_g: simGrams }); })}>
-                      Simulate placement
-                    </button>
-                  </div>
-                )}
-                <button className="textbutton" onClick={resetItem}>Cancel this item</button>
-              </div>
-            )}
-            {step === "review" && found && (
-              <div className="review">
-                <div className="metrics">
-                  <div><span>Product</span><strong>{product(productId)}</strong></div>
-                  <div><span>Item weight</span><strong>{found.delta_g.toFixed(1)} g</strong></div>
-                  <div><span>Sensor noise</span><strong>±{Number(found.noise_g).toFixed(1)} g</strong></div>
-                  <div><span>Spot</span><strong>{spot === "" ? "—" : Number(spot) + 1}</strong></div>
-                </div>
-                {!found.sensor_health.ok && <Notice>Sensor reported a fault for this reading. Saving will be refused; redo the placement.</Notice>}
-                {found.calibration_version !== tray.calibration_version && (
-                  <Notice>This reading used calibration {found.calibration_version}, not the tray's {tray.calibration_version}. Saving will be refused.</Notice>
-                )}
-                <div className="photos">
-                  {before ? <CatalogueImage name={before} token={token} alt="Tray before placement" /> : <div className="loadphoto empty-photo">Before: no camera</div>}
-                  {after ? <CatalogueImage name={after} token={token} alt="Tray after placement" /> : <div className="loadphoto empty-photo">After: no camera</div>}
-                </div>
-                {camera === "unavailable" && <p className="muted">Camera unavailable — the item will be saved without photos.</p>}
-                <div className="actions">
-                  <button disabled={busy}
-                    onClick={() => run(async () => {
-                      const r = await action(`/staff/loads/${load.id}/units`, {
-                        product_id: productId,
-                        weight_event_id: found.event_id,
-                        spot: spot === "" ? null : Number(spot),
-                        crop_refs: [before, after].filter(Boolean),
-                      });
-                      setResult({ ...r, product: product(productId) });
-                      setSpot("");
-                      resetItem();
-                    })}>
-                    Save item
-                  </button>
-                  <button className="secondary" disabled={busy} onClick={resetItem}>Redo this item</button>
-                </div>
-              </div>
-            )}
-            {result && (
-              <div className={result.warnings.length ? "result warn" : "result"} role="status">
-                <CheckCircle size={20} /> Saved {result.product} at {result.weight_g.toFixed(1)} g.
-                {result.warnings.map((w: any) => (
-                  <p key={w.unit_id}>
-                    Weight is within {w.difference_g} g of a {product(w.product_id)} on this tray. The scale alone may not
-                    tell them apart; the camera or staff review will decide.
-                  </p>
-                ))}
-              </div>
-            )}
-            <h3>Loaded in this session ({loaded.length})</h3>
-            <UnitTable units={loaded} product={product} action={action} />
-            <button className="secondary" disabled={busy || step !== "choose"}
-              onClick={() => run(async () => { await action(`/staff/loads/${load.id}/close`, {}); resetItem(); setResult(null); })}>
-              Finish loading
-            </button>
-          </div>
+          <GuidedLoad data={data} token={token} action={action} tray={tray} load={load} still={still} />
         )}
       </section>
       {tray?.unit_tracking && (

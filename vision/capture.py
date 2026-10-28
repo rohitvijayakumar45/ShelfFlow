@@ -39,27 +39,36 @@ class RollingBuffer:
                 self.size -= len(self.frames.popleft().jpeg)
                 self.dropped += 1
 
-    def preserve(self, root, event_id, start_monotonic, end_monotonic, redact=None):
+    def preserve(self, root, event_id, start_monotonic, end_monotonic, redact=None, background=False, max_frames=None):
         """Write the frames of one collection window. redact(jpeg) -> (jpeg, faces) blurs faces;
-        frames without a face stay the original bytes (no recompression)."""
+        frames without a face stay the original bytes (no recompression). background: return the file names
+        at once and write on a thread (blurring ~0.1 s a frame once froze the live loop for 9 s).
+        max_frames: keep at most this many, evenly spread over the window (an event lists at most 100 refs)."""
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
         with self.lock:
             selected = [f for f in self.frames if start_monotonic <= f.received_monotonic <= end_monotonic]
-        refs = []
-        for f in selected:
-            name = f"{event_id}-{f.boot_id}-{f.sequence}.jpg"
-            jpeg, faces = redact(f.jpeg) if redact else (f.jpeg, 0)
-            (root / name).write_bytes(jpeg)
-            metadata = {key: value for key, value in vars(f).items() if key != "jpeg"}
-            metadata["faces_redacted"] = faces
-            metadata["original_bytes"] = faces == 0
-            (root / name.replace('.jpg', '.json')).write_text(json.dumps(metadata), encoding="utf-8")
-            refs.append(name)
-        return refs
+        if max_frames and len(selected) > max_frames:
+            step = len(selected) / max_frames
+            selected = [selected[int(k * step)] for k in range(max_frames)]
+        names = [f"{event_id}-{f.boot_id}-{f.sequence}.jpg" for f in selected]
+
+        def write():
+            for f, name in zip(selected, names):
+                jpeg, faces = redact(f.jpeg) if redact else (f.jpeg, 0)
+                (root / name).write_bytes(jpeg)
+                metadata = {key: value for key, value in vars(f).items() if key != "jpeg"}
+                metadata["faces_redacted"] = faces
+                metadata["original_bytes"] = faces == 0
+                (root / name.replace('.jpg', '.json')).write_text(json.dumps(metadata), encoding="utf-8")
+        if background:
+            threading.Thread(target=write, name=f"evidence-{event_id[:8]}", daemon=True).start()
+        else:
+            write()
+        return names
 
 class Capture:
-    def __init__(self, url, token, mode="A", buffer=None, transport="poll", stream_url=None):
+    def __init__(self, url, token, mode="A", buffer=None, transport="poll", stream_url=None, latest=False):
         if transport not in ("poll", "stream"):
             raise ValueError("transport must be poll or stream")
         self.url, self.token, self.mode, self.transport = url.rstrip('/'), token, mode, transport
@@ -73,6 +82,13 @@ class Capture:
         self.offset_us = None
         self.uncertainty_ms = float('inf')
         self.failures = 0
+        # latest (stream only): a reader thread keeps just the newest part, so a loop slower than the camera
+        # skips frames instead of falling ever further behind (it once lagged 100 s and saw no fresh frame).
+        self.latest = latest and transport == "stream"
+        self._reader = None
+        self._cond = threading.Condition()
+        self._newest, self._count, self._taken, self._stop = None, 0, 0, False
+        self.skipped = 0
 
     def sync(self):
         a = time.time()
@@ -110,13 +126,46 @@ class Capture:
             self.stream.close()
             self.stream = None
 
+    def _read_latest(self):
+        client = httpx.Client(timeout=3)
+        while not self._stop:
+            stream = None
+            try:
+                stream = MjpegStream(client, self.stream_url, self.token)
+                while not self._stop:
+                    part = stream.next_part()
+                    with self._cond:
+                        self._newest, self._count = part, self._count + 1
+                        self._cond.notify_all()
+            except Exception:
+                time.sleep(1)  # camera or proxy gone: reconnect; poll() reports no new frame meanwhile
+            finally:
+                if stream is not None:
+                    stream.close()
+        client.close()
+
+    def _fetch_latest(self):
+        if self._reader is None:
+            self._reader = threading.Thread(target=self._read_latest, name="camera-latest", daemon=True)
+            self._reader.start()
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._count > self._taken, timeout=3):
+                raise TimeoutError("No new camera frame for 3 s")
+            self.skipped += self._count - self._taken - 1
+            self._taken = self._count
+            return self._newest
+
     def close(self):
+        self._stop = True
         self.close_stream()
         self.client.close()
 
     def poll(self):
         start = time.monotonic()
-        headers, content = self._fetch_stream() if self.transport == "stream" else self._fetch_poll()
+        if self.latest:
+            headers, content = self._fetch_latest()
+        else:
+            headers, content = self._fetch_stream() if self.transport == "stream" else self._fetch_poll()
         if not content.startswith(b'\xff\xd8'):
             raise ValueError('Camera response is not JPEG transport')
         end, wall = time.monotonic(), time.time()

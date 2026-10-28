@@ -76,6 +76,7 @@ class MotionProof:
         self.frames = 0
         self.last_time = start
         self.hand_markers = Counter()
+        self.together_frames = 0  # frames with two different bracelets at hands at once
 
     def observe(self, t, items, hands, markers, ref=None):
         """items: [(track_id, box)], hands: [box], markers: [{"id", "corners"}]."""
@@ -93,6 +94,8 @@ class MotionProof:
                 if inside((sum(xs) / 4, sum(ys) / 4), reach):
                     near[i].add(m["id"])
                     self.hand_markers[m["id"]] += 1
+        if len(set().union(*near.values())) > 1:
+            self.together_frames += 1
         for track_id, box in items:
             if track_id is None:
                 continue
@@ -127,7 +130,10 @@ class MotionProof:
             tracks[track_id] = {"frames": s.frames, "contact_frames": s.contact_frames, "exited": exited, "entered": entered,
                                 "markers": {int(k): v for k, v in s.markers.items()}, "refs": list(s.refs)}
         return {"frames": self.frames, "hand_frames": self.hand_frames, "hand_seen": self.hand_frames > 0,
-                "hand_markers": {int(k): v for k, v in self.hand_markers.items()}, "tracks": tracks}
+                "hand_markers": {int(k): v for k, v in self.hand_markers.items()},
+                "bracelets_together_frames": self.together_frames, "tracks": tracks}
+
+BRACELET_DOMINANCE = 0.75  # share of a hand's band sightings one pattern needs to name the bracelet
 
 def annotate(candidates, summary, action, min_marker_frames=2):
     """Set the evidence flags of review candidates from a MotionProof summary (in place)."""
@@ -146,7 +152,15 @@ def annotate(candidates, summary, action, min_marker_frames=2):
         if seen:
             c.marker_ids = sorted(seen)[:16]  # markers at the hand that moved the item, not every marker in view
             c.bracelet_hand = True
-            c.identity = len(seen) == 1
+            # The model can flip between the two band patterns on ONE bracelet. With only one bracelet in view
+            # all window, every sighting is that bracelet; with two at once, only this item's hand counts.
+            # The bracelet is named only when one pattern clearly dominates; a split goes to staff.
+            pool = track["markers"] if summary.get("bracelets_together_frames") else (summary.get("hand_markers") or track["markers"])
+            top, n = max(pool.items(), key=lambda kv: kv[1])
+            if n / sum(pool.values()) >= BRACELET_DOMINANCE and top in seen:
+                c.marker_ids, c.identity = [top], True
+            else:
+                c.marker_ids, c.identity = sorted(set(seen) | {top})[:16], False
         c.chain_refs = track["refs"][:30]
     return candidates
 
@@ -181,12 +195,51 @@ BAND_MARKERS = {"band-stripe": 200, "band-circle": 201}
 
 
 def split_bands(detections, band_markers=None):
-    """(products, bands) from one frame's detections."""
+    """(products, bands) from one frame's detections. A bracelet the model names twice (stripes AND circles
+    on the same spot) keeps only its more confident pattern; otherwise one wrist looks like two bracelets."""
     band_markers = BAND_MARKERS if band_markers is None else band_markers
     products, bands = [], []
     for d in detections:
         (bands if d.sku in band_markers else products).append(d)
-    return products, bands
+    def iou(a, b):
+        iw, ih = max(0.0, min(a[2], b[2]) - max(a[0], b[0])), max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - iw * ih
+        return iw * ih / union if union > 0 else 0.0
+    kept = []
+    for d in sorted(bands, key=lambda b: -b.confidence):
+        # Near-identical boxes are one bracelet named twice; two real bracelets side by side overlap far less.
+        if all(iou(d.box, k.box) < 0.8 for k in kept):
+            kept.append(d)
+    return products, kept
+
+
+class BandConfirmer:
+    """Two shoppers at the shelf: a bracelet counts as seen once its pattern is in `frames` consecutive frames
+    (one stray frame of the other pattern breaks the run). Reported once per appearance; it can be reported
+    again only after it has been out of view for `gap` frames."""
+
+    def __init__(self, frames=5, gap=10):
+        self.need, self.gap = frames, gap
+        self.streak, self.missing, self.reported = {}, {}, set()
+
+    def update(self, markers):
+        """markers: the bracelet marker IDs in this frame. Returns the IDs confirmed by this frame."""
+        seen, confirmed = set(markers), []
+        for m in list(self.streak):
+            if m not in seen:
+                self.streak.pop(m)
+        for m in list(self.reported):
+            self.missing[m] = 0 if m in seen else self.missing.get(m, 0) + 1
+            if self.missing[m] >= self.gap:
+                self.reported.discard(m)
+                self.missing.pop(m)
+        for m in seen:
+            self.streak[m] = self.streak.get(m, 0) + 1
+            if self.streak[m] >= self.need and m not in self.reported:
+                self.reported.add(m)
+                self.missing[m] = 0
+                confirmed.append(m)
+        return confirmed
 
 
 def band_evidence(bands, origin, band_markers=None, reach=3.0):
@@ -198,3 +251,21 @@ def band_evidence(bands, origin, band_markers=None, reach=3.0):
         markers.append({"id": band_markers[d.sku], "corners": [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]})
         hands.append(expand((x1, y1, x2, y2), reach))
     return markers, hands
+
+
+def track_candidates(summary, skus, matches, clip_id, action):
+    """Several items moved in one weight window (e.g. two shoppers reaching in together): one candidate
+    per moved item track, so each carries only the bracelet seen at the hand that moved it. The shared
+    scale then checks the total; fusion holds the event for review when any hand stays unproven.
+    None unless at least two items moved and every one of them was named as a known product.
+
+    skus: {track_id: product id last named for that track}; matches: {track_id: Match} for scores.
+    """
+    from backend.schemas import Candidate
+    from vision.association import scores
+    moved = [tid for tid, t in sorted(summary["tracks"].items()) if (t["exited"] if action == "PICKUP" else t["entered"])]
+    if len(moved) < 2 or not all(skus.get(tid) not in (None, "UNKNOWN") for tid in moved):
+        return None
+    out = [Candidate(product_id=skus[tid], product_track=f"{clip_id}:{tid}", hand_track="UNPROVEN", action=action,
+                     quantity=1, sku=True, detector_confidence=0.0, **scores(matches.get(tid))) for tid in moved]
+    return annotate(out, summary, action)

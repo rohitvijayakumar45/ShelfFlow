@@ -66,7 +66,8 @@ def test_camera_pickup_is_suggested_with_the_bracelet_marker_owner_and_recorded_
     assert pre.from_evidence(sg["hypothesis_id"], {"product_id": "oat", "session_id": sid_a, "quantity_delta": 1,
                                                    "physical_confirmed": True, "reason": "video shows A taking oats"}, "k1", "staff")["duplicate"]
 
-def test_rfid_tap_names_the_customer_when_no_marker_was_seen():
+def test_rfid_tap_names_the_customer_when_no_marker_was_seen(monkeypatch):
+    monkeypatch.setattr(config, "ENTRY_READER", ""), monkeypatch.setattr(config, "EXIT_READER", "")  # both readers on the shelf
     count()
     enter("A", "a")
     sid_b, _, _ = enter("B", "b")
@@ -74,6 +75,15 @@ def test_rfid_tap_names_the_customer_when_no_marker_was_seen():
     camera_event()
     [sg] = suggestions()
     assert sg["session_id"] == sid_b and any("R2" in w for w in sg["why"])
+
+def test_entry_and_exit_reader_taps_never_name_a_shelf_customer():
+    count()
+    enter("A", "a")
+    sid_b, _, _ = enter("B", "b")
+    rfid_tap(bracelet_of(sid_b).rfid, "R1")   # entry registry, not the shelf
+    camera_event()
+    [sg] = suggestions()
+    assert sg["session_id"] is None
 
 def test_two_bracelets_nearby_leave_the_customer_for_staff():
     count()

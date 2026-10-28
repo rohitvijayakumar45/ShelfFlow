@@ -204,8 +204,55 @@ def label_uncertain(crop_id, product_id, actor):
                                                 "vision_top": row.top_product, "vision_was_right": row.top_product == product_id})
         return {"id": row.id, "status": row.status, "reference_id": ref.id}
 
+THUMBNAIL_MAX_UPLOAD = 12_000_000  # phone photos are large; they are shrunk before saving
+THUMBNAIL_SIDE = 640
+
+def thumbnail_name(product_id):
+    return f"thumb-{product_id}.jpg"
+
+def has_thumbnail(product_id):
+    return (catalogue_root() / thumbnail_name(product_id)).is_file()
+
+def set_thumbnail(product_id, data, actor):
+    """Staff-chosen catalogue photo: decoded, shrunk to at most 640 px and saved as JPEG (never the raw upload)."""
+    import cv2
+    import numpy as np
+    if not PRODUCT_ID.fullmatch(product_id or ""):
+        fail("Unknown product", 404)
+    with transaction() as db:
+        get(db, Product, product_id)
+    if not data or len(data) > THUMBNAIL_MAX_UPLOAD:
+        fail("Choose a photo under 12 MB", 422)
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        fail("That file is not a photo (use JPEG or PNG)", 422)
+    h, w = image.shape[:2]
+    scale = min(1.0, THUMBNAIL_SIDE / max(h, w))
+    if scale < 1:
+        image = cv2.resize(image, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        fail("Could not save the photo", 422)
+    target = catalogue_root() / thumbnail_name(product_id)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_bytes(encoded.tobytes())
+    os.replace(temporary, target)
+    with transaction() as db:
+        audit(db, actor, "PRODUCT_THUMBNAIL", {"product_id": product_id, "bytes": len(encoded), "size": [image.shape[1], image.shape[0]]})
+    return {"product_id": product_id, "thumbnail": True}
+
+def remove_thumbnail(product_id, actor):
+    if not PRODUCT_ID.fullmatch(product_id or ""):
+        fail("Unknown product", 404)
+    (catalogue_root() / thumbnail_name(product_id)).unlink(missing_ok=True)
+    with transaction() as db:
+        audit(db, actor, "PRODUCT_THUMBNAIL_REMOVED", {"product_id": product_id})
+    return {"product_id": product_id, "thumbnail": False}
+
 def best_image(db, product_id):
-    """The clearest ACTIVE reference of a product (for cart and receipt thumbnails)."""
+    """The staff-chosen thumbnail, else the clearest ACTIVE reference (for cart and receipt thumbnails)."""
+    if PRODUCT_ID.fullmatch(product_id or "") and has_thumbnail(product_id):
+        return thumbnail_name(product_id)
     refs = list(db.scalars(select(ProductReference).where(ProductReference.product_id == product_id, ProductReference.status == "ACTIVE")))
     if not refs:
         return None

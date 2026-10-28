@@ -27,7 +27,7 @@ export function AuthImage({ path, token, alt, className }: { path: string; token
 }
 
 const pct = (v: number | null | undefined) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
-const reasonText = (r: string) => r.replaceAll("_", " ").toLowerCase();
+import { reasonText } from "./reasons";
 
 /** Store-level numbers, recognition tuning, scale drift and shrink, all from staff decisions and sensor data. */
 export function Insights({ data, action, token }: { data: any; action: Action; token: string }) {

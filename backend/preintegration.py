@@ -99,6 +99,8 @@ def _rfid_sessions(db, t0, t1):
         refs = e.payload.get('evidence_refs', [])
         uid = next((r[5:] for r in refs if r.startswith('RFID:')), None)
         reader = next((r[12:] for r in refs if r.startswith('RFID_READER:')), '?')
+        if reader in svc.registry_readers():
+            continue  # entry/exit registry taps say nothing about who was at the shelf
         b = db.scalar(select(Bracelet).where(Bracelet.rfid == uid, Bracelet.state == 'ASSIGNED')) if uid else None
         if b and b.session_id:
             found.setdefault(b.session_id, set()).add(reader)

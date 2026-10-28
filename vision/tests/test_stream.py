@@ -67,3 +67,27 @@ def test_stream_rejects_oversized_part():
 def test_unknown_transport_refused():
     with pytest.raises(ValueError):
         Capture('http://camera', 'k', transport='udp')
+
+
+def test_latest_mode_skips_to_the_newest_frame_when_the_loop_is_slow(monkeypatch):
+    import time as clock
+    class Camera(httpx.SyncByteStream):  # one frame every 50 ms, like the real camera, then stays open
+        def __iter__(self):
+            for n in range(1, 9):
+                yield part(n, 1000 * n)
+                clock.sleep(0.05)
+            clock.sleep(5)
+    def respond(request):
+        if request.url.path == '/clock':
+            return httpx.Response(200, json={'boot_id': 'b', 'monotonic_us': 1000})
+        return httpx.Response(200, headers={'Content-Type': 'multipart/x-mixed-replace;boundary=sfframe'}, stream=Camera())
+    real = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda *a, **k: real(transport=httpx.MockTransport(respond)))
+    capture = Capture('http://camera', 'test-key', transport='stream', latest=True)
+    first = capture.poll()
+    deadline = clock.time() + 2
+    while capture._count < 8 and clock.time() < deadline:   # the camera keeps sending while the loop is busy
+        clock.sleep(0.01)
+    newest = capture.poll()
+    assert newest.sequence == 8 and newest.sequence > first.sequence and capture.skipped >= 1
+    capture.close()

@@ -4,6 +4,9 @@ A standalone, continuous-sensing smart-store prototype for **one OV3660 shelf ca
 
 **Current prototype (16 October):** one mixed-product tray with three calibrated load cells, two RC522 readers, a verified OV3660 camera and a trained three-product pilot. The USB controller integration and customer/staff apps run locally in hardware mode. Physical ownership remains review-first; payments are simulated. Follow [local hardware integration](docs/local-hardware-integration.md), or use the simulation instructions below. Historical validation is in [implementation status](docs/status.md).
 
+**How the whole system works now** (hardware, services, a customer's visit, carts, stock, training, settings,
+troubleshooting): [docs/system-overview.md](docs/system-overview.md).
+
 ## Fast local start (Windows, no Docker required)
 
 Python 3.12 and Node 22+ are recommended. From this folder:

@@ -10,7 +10,6 @@ the staff app reaches it through its /trainer proxy with the normal staff login.
   python -m tools.local_app trainer                    # hardware setup with runtime.env
 """
 import argparse
-import asyncio
 import os
 import shutil
 import subprocess
@@ -359,7 +358,9 @@ def train(body: Train, user=Depends(staff)):
     rid = time.strftime("%Y%m%d-%H%M%S")
     run = RUNS / rid
     try:
-        summary = T.build_dataset(chosen, run / "dataset", parent=parent / "dataset" if parent else None)
+        # The parent model labels the other products visible in each new clip (see T.AutoLabeller).
+        labeller = T.AutoLabeller(parent / "best.pt", T.resolve_device("auto")) if parent and (parent / "best.pt").is_file() else None
+        summary = T.build_dataset(chosen, run / "dataset", parent=parent / "dataset" if parent else None, labeller=labeller)
     except ValueError as exc:
         shutil.rmtree(run, ignore_errors=True)
         raise HTTPException(422, str(exc))
@@ -634,17 +635,18 @@ def test_stop(user=Depends(staff)):
 
 # ---------------- Live view and status ----------------
 
-async def mjpeg(source):
-    """multipart/x-mixed-replace of the newest frame; a slow viewer skips frames instead of lagging."""
-    last = -1
-    idle = 0.0
-    while idle < 30:
-        if source.serial != last and source.jpeg:
-            jpeg, last, idle = source.jpeg, source.serial, 0.0
-            yield b"--sfframe\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
-        else:
-            await asyncio.sleep(0.01)
-            idle += 0.01
+def mjpeg(source):
+    """multipart/x-mixed-replace of the newest frame; a slow viewer skips frames instead of lagging.
+    A plain generator that waits for each new frame (Starlette runs it on a worker thread): polling with
+    short sleeps on the event loop starved behind the recording and froze the view at 0.2 fps."""
+    last, quiet_since = -1, time.monotonic()
+    while time.monotonic() - quiet_since < 30:
+        with source.condition:
+            if not source.condition.wait_for(lambda: source.serial != last and bool(source.jpeg), timeout=1):
+                continue
+            jpeg, last = source.jpeg, source.serial
+        quiet_since = time.monotonic()
+        yield b"--sfframe\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
 
 
 @app.get("/stream")

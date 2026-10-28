@@ -37,12 +37,17 @@ class DetectorPreview(camera_preview.SharedCamera):
         # Same live references as the vision service (teach, restock, staff labels), so a
         # newly taught product is named here too instead of showing as Unknown.
         self.sync, self.synced = None, 0.0
-        if backend and device_key and not products_model:
+        # Tray loading saves a before/after still per item; this turns each into a product reference (the
+        # vision service does the same when it runs). Without it the loading table stays at "learning…".
+        self.enroll, self.enrolled = None, 0.0
+        if backend and device_key:
             import httpx
-            from vision.references import ReferenceSync
+            from vision.references import EnrollmentWorker, ReferenceSync
             api = httpx.Client(base_url=backend, headers={'X-Device-Key': device_key}, timeout=5, trust_env=False)
-            cache = Path(__file__).resolve().parents[1] / 'data/integration/reference-cache'
-            self.sync = ReferenceSync(api, self.gallery, self.embedder, cache, report=False)
+            self.enroll = EnrollmentWorker(api)
+            if not products_model:
+                cache = Path(__file__).resolve().parents[1] / 'data/integration/reference-cache'
+                self.sync = ReferenceSync(api, self.gallery, self.embedder, cache, report=False)
 
     def start(self):
         self.source.start()
@@ -80,6 +85,14 @@ class DetectorPreview(camera_preview.SharedCamera):
                         print('Switched to the trained product model', self.trained, flush=True)
                 except Exception as exc:  # half-written or unreadable: keep the current model, retry next check
                     print('Model reload failed:', type(exc).__name__, flush=True)
+            if self.enroll and started - self.enrolled > 5:
+                self.enrolled = started
+                try:
+                    done = self.enroll.run_once()
+                    if done:
+                        print('Tray-loading references:', done, flush=True)
+                except Exception as exc:  # backend down: the jobs wait for the next round
+                    print('Reference enrolment failed:', type(exc).__name__, flush=True)
             if self.sync and started - self.synced > 10:
                 self.synced = started
                 try:
