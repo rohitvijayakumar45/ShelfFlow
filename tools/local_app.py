@@ -45,12 +45,9 @@ def prepare():
         from backend.models import Product,Tray,Device,Bracelet,Customer,Account,Shelf
         from backend.auth import hash_password
         with SessionLocal.begin() as db:
-            for pid,name,price in [('sanitizer','Sanitizer',2500),('vicks','Vicks',19900),('sunscreen','Sunscreen',9900)]:
-                db.add(Product(id=pid,name=name,price_minor=price,unit_g=None,tolerance_g=None,weight_source='UNMEASURED'))
-            db.flush()
+            # seed() already created the store catalogue (backend.seed.STORE_PRODUCTS); one tray, whole frame.
             tray=db.get(Tray,'tray-a');tray.product_id='sanitizer';tray.roi=[0,0,1,1];tray.unit_tracking=True
             db.delete(db.get(Tray,'tray-b'));db.flush()
-            for pid in ('oat','coffee','bar','chips'):db.delete(db.get(Product,pid))
             db.get(Device,'sensor-1').secret_digest=hashlib.sha256(os.environ['SENSOR_DEVICE_KEY'].encode()).hexdigest()
             db.get(Shelf,'shelf-1').camera_config={'status':'OV3660_VERIFIED_PILOT','mode':'A','integration_setup':True}
             db.add(Bracelet(id='B01',rfid='43D51829',markers=[],clean=False,state='RETURNED'))
@@ -73,6 +70,9 @@ def main():
     import sys
     if args.service=='backend':
         os.environ.setdefault('MANUAL_CAPTURE_WORKER', 'true')
+        os.environ.setdefault('EXIT_WORKER', 'true')  # bills exit-reader (R2) taps once nothing blocks them
+        # Offline demo: the apps are opened from phones on the hotspot at https://<laptop private IP>:5173/5174.
+        os.environ.setdefault('CORS_ORIGIN_REGEX', r'https://(10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2}):517[34]')
         import uvicorn
         uvicorn.run('backend.main:app',host='127.0.0.1',port=8000,access_log=False)
     elif args.service=='trainer':

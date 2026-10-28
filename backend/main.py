@@ -1,6 +1,8 @@
 import hashlib
 import hmac
+import json
 import os
+import re
 import time
 import asyncio
 from collections import defaultdict, deque
@@ -20,19 +22,48 @@ from pydantic import Field
 from typing import Literal
 from contextlib import asynccontextmanager
 
+def exit_worker(stop):
+    """Bills exit-reader taps that were blocked (pending review, shelf event in flight) once they clear."""
+    while not stop.wait(3):
+        try:
+            svc.process_exit_requests()
+        except Exception as exc:
+            print('Exit worker:', type(exc).__name__, flush=True)
+
+def camera_wait_worker(stop):
+    """Hybrid attribution: shared-shelf weight steps the camera never reported go to the Review queue."""
+    from backend import shelf_cart
+    while not stop.wait(5):
+        try:
+            shelf_cart.sweep()
+        except Exception as exc:
+            print('Camera wait worker:', type(exc).__name__, flush=True)
+
 @asynccontextmanager
 async def capture_lifespan(app):
     if os.getenv('MANUAL_CAPTURE_WORKER', 'false').lower() in ('1', 'true'):
         from backend.manual_capture import start_worker
         start_worker()
+    import threading
+    exits = threading.Event()
+    if os.getenv('EXIT_WORKER', 'false').lower() in ('1', 'true'):
+        threading.Thread(target=exit_worker, args=(exits,), name='exit-reader', daemon=True).start()
+    from backend import camera_watch
+    if settings.CART_ATTRIBUTION in ('rfid', 'hybrid') and MODE != 'simulation':
+        camera_watch.start()  # what the camera saw before and after each shelf weight step
+    if settings.CART_ATTRIBUTION == 'hybrid' and MODE != 'simulation':
+        threading.Thread(target=camera_wait_worker, args=(exits,), name='camera-wait', daemon=True).start()
     try:
         yield
     finally:
+        exits.set()
+        camera_watch.stop()
         from backend.manual_capture import stop_worker
         stop_worker()
 
 app = FastAPI(title="ShelfFlow", version="0.1.0", description="Continuous single-camera smart-store prototype. Simulation is explicitly labelled; real ownership is review-first.", lifespan=capture_lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","), allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type", "X-Device-Key"])
+# CORS_ORIGIN_REGEX additionally admits app origins whose address changes (the demo hotspot IP).
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","), allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None, allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type", "X-Device-Key"])
 limits = defaultdict(deque)
 
 @app.middleware("http")
@@ -86,6 +117,12 @@ def customer_cart(user=Depends(customer)):
     with SessionLocal() as db:
         return svc.cart(db, user["sub"])
 
+@app.post("/customer/next-visit")
+def next_visit(user=Depends(customer)):
+    """Bracelet handed over after the bill: sign in to a fresh visit so the app can show a new entry code."""
+    sid = svc.next_visit(user["sub"])
+    return {"token": issue("customer", sid), "session_id": sid}
+
 @app.post("/customer/entry-token")
 def qr(user=Depends(customer)):
     return svc.entry_qr(user["sub"])
@@ -121,7 +158,52 @@ def event(device_id: str, body: DeviceEvent, x_device_key: str = Header()):
     device_auth(device_id, x_device_key)
     if body.device_id != device_id:
         raise HTTPException(403, "Device scope mismatch")
-    return svc.ingest(body)
+    result = svc.ingest(body)
+    if body.event_type == "HEALTH" and body.weight and body.tray_id:
+        w = body.weight
+        note_live(body.tray_id, w.filtered if w.filtered is not None else w.post_g, w.post_g)
+    if body.event_type == "RFID" and not result.get("duplicate"):
+        try:
+            svc.process_exit_requests()  # an exit-reader tap with nothing pending is billed right away
+        except Exception as exc:
+            print('Exit billing deferred to the worker:', type(exc).__name__, flush=True)  # the tap itself is stored
+    return result
+
+# ---------------- Live tray weight (staff screens) ----------------
+# The controller's live and held weight, once a second from the USB bridge and with every HEALTH report.
+# Memory only: it changes no cart and is never stored. Shown like the shelf LCD: within LIVE_STEP_G of the
+# held weight the reading is drift, so the held whole grams show; a bigger difference is shown live.
+LIVE_STEP_G = 3.0
+_live_weight: dict[str, dict] = {}
+
+def note_live(tray_id, live_g, held_g):
+    display = held_g if abs(live_g - held_g) < LIVE_STEP_G else live_g
+    _live_weight[tray_id] = {'live_g': round(live_g, 1), 'held_g': round(held_g, 1), 'display_g': round(display, 1), 'at': time.time()}
+
+class LiveWeight(StrictModel):
+    tray_id: str = Field(max_length=40)
+    live_g: float
+    held_g: float
+
+@app.post("/devices/{device_id}/live")
+def live_weight(device_id: str, body: LiveWeight, x_device_key: str = Header()):
+    device_auth(device_id, x_device_key)
+    note_live(body.tray_id, body.live_g, body.held_g)
+    return {"ok": True}
+
+class BraceletSeen(StrictModel):
+    marker: int = Field(ge=0, le=100000)
+    tray_id: str = Field(max_length=40)
+    frames: int = Field(ge=1, le=100)
+    seen_at: float
+
+@app.post("/devices/vision-1/bracelet-seen")
+def bracelet_seen(body: BraceletSeen, x_device_key: str = Header()):
+    """The camera confirmed a bracelet pattern (N frames in a row): with several shoppers at the shelf, the
+    nearest weight change goes to that bracelet's customer (backend/shelf_cart.py)."""
+    device_auth("vision-1", x_device_key)
+    from backend import shelf_cart
+    return shelf_cart.bracelet_seen(**body.model_dump())
 
 @app.get("/devices/vision-1/bindings")
 def vision_bindings(x_device_key: str = Header()):
@@ -142,7 +224,8 @@ def vision_config(x_device_key: str = Header()):
             now=time.time()
             teach=db.scalar(select(TeachSession).where(TeachSession.tray_id==t.id,TeachSession.status=='ACTIVE',TeachSession.until>now,TeachSession.accepted<TeachSession.max_refs))
             trays[t.id]["teach"]={"teach_id":teach.id,"product_id":teach.product_id,"until":teach.until,"remaining":teach.max_refs-teach.accepted} if teach else None
-        return {"trays":trays,"recognition":recognition_settings(db),"weights_enabled":settings.WEIGHTS_ENABLED}
+        return {"trays":trays,"recognition":recognition_settings(db),"weights_enabled":settings.WEIGHTS_ENABLED,
+                "registry_readers":svc.registry_readers()}
 
 class Checkout(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=100)
@@ -151,6 +234,15 @@ class Checkout(StrictModel):
 @app.post("/customer/checkout")
 def pay(body: Checkout, user=Depends(customer)):
     return svc.checkout(user["sub"], body.idempotency_key, body.outcome, False, "", "customer")
+
+@app.post("/customer/checkout-request")
+def checkout_request(user=Depends(customer)):
+    """Customer is done: the app sends them to the exit, where the bracelet tap on the exit reader bills the visit."""
+    return svc.request_checkout(user["sub"])
+
+@app.post("/customer/checkout-request/withdraw")
+def withdraw_checkout_request(user=Depends(customer)):
+    return svc.request_checkout(user["sub"], withdraw=True)
 
 class Reason(StrictModel):
     reason: str = Field(min_length=3, max_length=500)
@@ -211,6 +303,11 @@ def state(user=Depends(staff)):
             del d["secret_digest"]
         for session in result['sessions']:
             session['customer_alias']=db.get(Customer,session['customer_id']).alias
+        # Explicit visit mapping: customer <-> shopping session <-> RFID UID <-> bracelet pattern (markers).
+        result['visit_bindings']=[{'session_id':b.session_id,'customer_alias':db.get(Customer,db.get(ShoppingSession,b.session_id).customer_id).alias,
+                                   'session_status':db.get(ShoppingSession,b.session_id).status,'bracelet_id':b.bracelet_id,'rfid':b.rfid,
+                                   'markers':b.markers,'started':b.started,'ended':b.ended}
+                                  for b in db.scalars(select(BraceletBinding).order_by(BraceletBinding.started.desc()).limit(50))]
         for tray in result['trays']:
             latest=db.scalar(select(SensorEvent).where(SensorEvent.payload['tray_id'].as_string()==tray['id'],SensorEvent.payload['weight']['raw'].as_float().is_not(None)).order_by(SensorEvent.received.desc()).limit(1))
             tray['latest_sample']={'weight':latest.payload['weight'],'health':latest.payload['sensor_health'],'capture_end':latest.payload['capture_end'],'calibration_version':latest.payload['calibration_version']} if latest else None
@@ -224,7 +321,26 @@ def state(user=Depends(staff)):
         for h in result['hypotheses']:
             h['captured']=events.get(h['event_id'])
             frames=clips.get(h['event_id'],[])
+            if not frames and h['status'] in ('PENDING_REVIEW','DISPUTED'):
+                # A shelf weight change has no frames: show the camera clip that cites it.
+                event=db.get(SensorEvent,h['event_id'])
+                clip=analytics.clip_event(db,event) if event else None
+                frames=[r for r in (clip.payload.get('evidence_refs',[]) if clip else []) if str(r).endswith('.jpg')]
             h['frames'],h['thumb']=len(frames),(frames[len(frames)//2] if frames else None)  # middle frame: the item is usually in hand
+        result['rfid_roles'] = {'entry': settings.ENTRY_READER, 'exit': settings.EXIT_READER}
+        result['unowned_pending'] = len(list(db.scalars(select(Hypothesis.id).where(Hypothesis.session_id == None,
+                                                                                   Hypothesis.status.in_(['PENDING_REVIEW', 'DISPUTED'])))))
+        # Front desk: who is in the store now, with their bracelet, running total and anything pending.
+        result['active_visits'] = []
+        for session in db.scalars(select(ShoppingSession).where(ShoppingSession.status == 'ACTIVE')):
+            c = svc.cart(db, session.id)
+            result['active_visits'].append({'session_id': session.id, 'customer_alias': db.get(Customer, session.customer_id).alias,
+                                            'bracelet': c['bracelet'], 'total_minor': c['total_minor'],
+                                            'items': sum(i['quantity'] for i in c['items']),
+                                            'pending': len(list(db.scalars(select(Hypothesis.id).where(Hypothesis.session_id == session.id,
+                                                                                                    Hypothesis.status.in_(['PENDING_REVIEW', 'DISPUTED']))))),
+                                            'exit_requested': c['exit_requested'], 'checkout_requested': c['checkout_requested']})
+        result['pending_exits'] = svc.pending_exits(db)
         result['assisted_stock'] = [serialize(o) for o in db.scalars(select(AssistedStock))]
         result['assisted_actions'] = [serialize(o) for o in db.scalars(select(AssistedAction).order_by(AssistedAction.created.desc()).limit(50))]
         return {**result, "mode": MODE, "weights_enabled": settings.WEIGHTS_ENABLED}
@@ -289,11 +405,11 @@ def assisted_from_evidence(hypothesis_id: str, body: EvidenceMove, user=Depends(
 
 
 @app.get('/staff/preintegration/camera')
-def preintegration_camera(user=Depends(staff)):
+def preintegration_camera(user=Depends(staff), timeout: float = 2):
     import httpx
     url = os.getenv('CAMERA_URL', 'http://127.0.0.1:8766')
     try:
-        response = httpx.get(url.rstrip('/')+'/status', timeout=2, trust_env=False)
+        response = httpx.get(url.rstrip('/')+'/status', timeout=timeout, trust_env=False)
         response.raise_for_status()
         status = response.json()
         age = status.get('frame_age_s')
@@ -303,6 +419,52 @@ def preintegration_camera(user=Depends(staff)):
                 'automatic_cart_changes': False}
     except (httpx.HTTPError, ValueError):
         return {'available': False, 'predictions': [], 'automatic_cart_changes': False}
+
+# Catalogue stock from the live camera: a product the camera named on the shelf in the last few
+# seconds counts as 1 in stock, anything else as out of stock. Held briefly so a hand passing over
+# the item does not flip it to out of stock.
+SHELF_SEEN_HOLD_S = 6
+_shelf_seen: dict[str, float] = {}
+
+def recognised_products():
+    """Class names of the camera model in use, or None without one."""
+    import json
+    active = Path(__file__).resolve().parents[1] / 'models/trained/active.json'
+    try:
+        classes = json.loads(active.read_text(encoding='utf-8')).get('classes') or []
+    except (OSError, ValueError):
+        return None
+    return [str(c) for c in classes]
+
+@app.get('/staff/shelf-stock')
+def shelf_stock(user=Depends(staff)):
+    camera = preintegration_camera(user, timeout=0.7)  # local preview: answers in ms when it runs
+    now = time.time()
+    if camera['available']:
+        for p in camera['predictions']:
+            if p.get('product') and p['product'] != 'UNKNOWN':
+                _shelf_seen[p['product']] = now
+    known = recognised_products()
+    if known is not None:
+        known = [c for c in known if not c.startswith('band-')]  # bracelet patterns are never products
+    with SessionLocal() as db:
+        products = {p.id: p for p in db.scalars(select(Product).order_by(Product.name))}
+        ids = [i for i in known if i in products] + [i for i in known if i not in products] if known is not None else list(products)
+        images = set(db.scalars(select(ProductReference.product_id).where(ProductReference.status == 'ACTIVE')))
+        # Items weighed onto a tray during loading are counted exactly; otherwise the camera decides (1 or 0).
+        weighed = {}
+        for u in db.scalars(select(TrayUnit).where(TrayUnit.status == 'ON_TRAY')):
+            weighed[u.product_id] = weighed.get(u.product_id, 0) + 1
+        items = []
+        for pid in ids:
+            p = products.get(pid)
+            seen = _shelf_seen.get(pid)
+            on_camera = 1 if seen and now - seen <= SHELF_SEEN_HOLD_S else 0
+            items.append({'product_id': pid, 'name': p.name if p else pid.replace('-', ' ').title(), 'price_minor': p.price_minor if p else None,
+                          'in_catalogue': p is not None, 'has_image': pid in images or refs.has_thumbnail(pid),
+                          'stock': weighed.get(pid) or on_camera, 'source': 'scale' if weighed.get(pid) else 'camera',
+                          'last_seen': seen})
+    return {'camera_live': camera['available'], 'items': items, 'checked': now}
 
 class SimInteraction(StrictModel):
     session_id: str
@@ -324,6 +486,7 @@ def simulate(body: SimInteraction, user=Depends(staff)):
         device = svc.get(db, Device, "simulator")
         seq = max(int(time.time() * 1000), device.max_sequence + 1)
         marker = b.markers[0]
+        tray_unit_g = (db.get(Product, tray.product_id).unit_g if db.get(Product, tray.product_id) else None) or 100
         unit_delta = None
         if tray.unit_tracking:
             # Weight-first demo: the chosen unit's measured weight moves; vision reports UNKNOWN.
@@ -338,7 +501,8 @@ def simulate(body: SimInteraction, user=Depends(staff)):
                 svc.fail("No matching unit " + ("in this cart from this tray" if returning else "on this tray"))
             unit_delta = unit.weight_g if returning else -unit.weight_g
     changes = {"HIDDEN_MARKER": {"marker_ids": []}, "CROSSED_HANDS": {"crossed": True}, "CAMERA_FAILURE": {"model_status": "MODEL_UNAVAILABLE"}, "WEIGHT_FAULT": {"sensor_health": Health(ok=False, flags=["DISCONNECTED"])}}
-    extra = {"product_id": "UNKNOWN", "sku": False} if unit_delta is not None else {}
+    # Single-product trays: the camera names the tray's own product (whatever the catalogue holds).
+    extra = {"product_id": "UNKNOWN", "sku": False} if unit_delta is not None else {"product_id": tray.product_id, "grams": tray_unit_g}
     event = interaction(marker=marker, tray=body.tray_id, action="RETURN" if body.scenario == "RETURN" else "PICKUP", sequence=seq, **extra, **changes.get(body.scenario, {}))
     if unit_delta is not None:
         event.weight = Weight(pre_g=2000, post_g=2000 + unit_delta, noise_g=0.5, settled=True)
@@ -384,10 +548,12 @@ def simulate_gate(body: SimGate, user=Depends(staff)):
     return svc.gate_ack(body.command_id, "WRONG" if body.scenario == "WRONG_UID" else rfid, body.scenario != "UNCERTAIN_RELEASE", True, "JAM" if body.scenario == "JAM" else "", "simulated-gate")
 
 class Review(Reason):
-    decision: Literal["CONFIRM", "DISMISS"]
+    # LEFT_TRAY: a shelf pickup nobody is charged for; RESTOCK: an item put on the tray that no cart holds
+    decision: Literal["CONFIRM", "DISMISS", "LEFT_TRAY", "RESTOCK"]
     session_id: str | None = None
     quantity: int = Field(default=1, ge=1, le=10)
     unit_ids: list[str] | None = Field(default=None, max_length=10)
+    product_id: str | None = None  # staff name the product when the shelf or camera could not
 
 @app.post("/staff/review/{hypothesis_id}")
 def review(hypothesis_id: str, body: Review, user=Depends(staff)):
@@ -448,7 +614,11 @@ class StaffExit(StrictModel):
 @app.get("/staff/visits/{session_id}")
 def visit(session_id: str, user=Depends(staff)):
     with SessionLocal() as db:
-        return svc.cart(db, session_id)
+        cart = svc.cart(db, session_id)
+        s = svc.get(db, ShoppingSession, session_id)
+        cart["customer_alias"] = db.get(Customer, s.customer_id).alias
+        cart["exit_blockers"] = svc.exit_blockers(db, session_id) if s.status == "ACTIVE" else []
+        return cart
 
 @app.post("/staff/exit")
 def staff_exit(body: StaffExit, user=Depends(staff)):
@@ -600,7 +770,7 @@ def load_snapshot(load_id: str, user=Depends(staff)):
     with SessionLocal() as db:
         if svc.get(db, TrayLoad, load_id).status != "OPEN":
             svc.fail("Loading session is closed")
-    jpeg = camera_jpeg()
+    jpeg = raw_camera_jpeg()  # the original frame: the detector's view has boxes and labels drawn in
     name = f"load-{load_id}-{uuid.uuid4().hex}.jpg"
     (catalogue_root() / name).write_bytes(jpeg)
     return {"ref": name, "bytes": len(jpeg)}
@@ -851,12 +1021,52 @@ def evidence_file(file_name: str, user=Depends(staff)):
         raise HTTPException(404, "Evidence unavailable")
     return FileResponse(path)
 
+def allowed_origin(ws: WebSocket):
+    origin = ws.headers.get("origin")
+    allowed = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
+    pattern = os.getenv("CORS_ORIGIN_REGEX")
+    return not origin or origin in allowed or bool(pattern and re.fullmatch(pattern, origin))
+
+@app.websocket("/ws/staff")
+async def staff_socket(ws: WebSocket):
+    """Staff screens: the live tray weight as it changes, and a 'changed' nudge after every committed cart,
+    review or shelf event so the screen reloads at once instead of on its next poll."""
+    if not allowed_origin(ws):
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    try:
+        user = decode((await asyncio.wait_for(ws.receive_json(), timeout=5)).get("token", ""))
+        if user["role"] != "staff":
+            await ws.close(code=1008)
+            return
+        live, seen, quiet = None, svc.changes(), 0
+        while True:
+            if user["exp"] < time.time():
+                await ws.close(code=1008)
+                return
+            if _live_weight != live:
+                live = {k: dict(v) for k, v in _live_weight.items()}
+                await ws.send_json({"type": "live", "trays": live})
+                quiet = 0
+            if svc.changes() != seen:
+                seen = svc.changes()
+                await ws.send_json({"type": "changed", "version": seen})
+                quiet = 0
+            quiet += 1
+            if quiet >= 40:  # ~10 s: keeps proxies from closing an idle socket
+                await ws.send_json({"type": "heartbeat"})
+                quiet = 0
+            await asyncio.sleep(0.25)
+    except WebSocketDisconnect:
+        return
+    except (asyncio.TimeoutError, HTTPException):
+        await ws.close(code=1008)
+
 @app.websocket("/ws/cart")
 async def websocket(ws: WebSocket):
     # First message auth avoids putting secrets in URL/access logs.
-    origin = ws.headers.get("origin")
-    allowed = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174").split(",")
-    if origin and origin not in allowed:
+    if not allowed_origin(ws):
         await ws.close(code=1008)
         return
     await ws.accept()
@@ -1077,6 +1287,49 @@ def evidence_timeline(event_id: str, user=Depends(staff)):
         if result is None:
             raise HTTPException(404, "Event not found")
         return result
+
+class Thumbnail(StrictModel):
+    image_base64: str = Field(min_length=16, max_length=17_000_000)
+
+@app.post("/staff/products/{product_id}/thumbnail")
+def product_thumbnail(product_id: str, body: Thumbnail, user=Depends(staff)):
+    """Catalogue photo chosen by staff (phone camera or file). Shown in the catalogue, cart and receipt."""
+    import base64, binascii
+    data = body.image_base64.split(",", 1)[-1]  # accept a data: URL as well as bare base64
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        svc.fail("Photo upload was damaged; try again", 422)
+    return refs.set_thumbnail(product_id, raw, user["sub"])
+
+@app.post("/staff/products/{product_id}/thumbnail/remove")
+def product_thumbnail_remove(product_id: str, user=Depends(staff)):
+    return refs.remove_thumbnail(product_id, user["sub"])
+
+# Shelf LCD guidance (tray loading): the USB bridge relays the newest request to the controller,
+# which shows it until it expires. '#' in a line becomes the live tray weight on the controller.
+class LcdGuide(StrictModel):
+    lines: list[str] = Field(default_factory=list, max_length=2)
+    seconds: int = Field(ge=0, le=600)
+
+last_lcd: dict = {}
+
+@app.post("/staff/trays/{tray_id}/lcd")
+def tray_lcd(tray_id: str, body: LcdGuide, user=Depends(staff)):
+    with SessionLocal() as db:
+        svc.get(db, Tray, tray_id)
+    lines = [("".join(ch for ch in line if " " <= ch <= "~" and ch != "|"))[:16] for line in (body.lines + ["", ""])[:2]]
+    request = {"lines": lines, "seconds": body.seconds, "created_s": time.time()}
+    last_lcd.update(tray_id=tray_id, **request)
+    root = Path(os.getenv("USB_EVENT_ROOT", "data/integration/usb"))
+    delivered = False
+    if MODE != "simulation":
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = root / "lcd-request.tmp"
+        temporary.write_text(json.dumps(request), encoding="utf-8")
+        os.replace(temporary, root / "lcd-request.json")  # the bridge consumes it within ~0.1 s
+        delivered = True
+    return {"lines": lines, "seconds": body.seconds, "sent_to_shelf": delivered}
 
 @app.get("/staff/product-image/{product_id}")
 def staff_product_image(product_id: str, user=Depends(staff)):

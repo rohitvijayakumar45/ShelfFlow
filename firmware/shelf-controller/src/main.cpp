@@ -81,6 +81,17 @@ std::atomic<int> rfidOnly{-1};
 std::atomic<uint32_t> readerReadCount[NREADER]{};
 std::atomic<uint32_t> rfidDropped{0}, rfidMaxScanGap[NREADER]{};
 uint8_t readerVersion[NREADER]{};
+// RFID self-healing (the scan once froze for minutes and only a controller reset brought it back).
+//   In the scan task: a reader whose version register stops answering, or that has heard no tag for
+//   RF_IDLE_REINIT_MS, gets both readers reset and re-initialised (rfidReinits).
+//   In the main loop: the task stamps rfidHeartbeat every pass; silent for RFID_STALL_MS, the task is
+//   deleted and started again (it resets the readers first, rfidRestarts). If that does not bring it
+//   back within RFID_RESTART_GRACE_MS (e.g. the old task died holding the SPI bus), the controller
+//   restarts; queued events survive on flash.
+constexpr uint32_t RF_HEALTH_CHECK_MS = 10000, RF_IDLE_REINIT_MS = 120000;
+constexpr uint32_t RFID_STALL_MS = 5000, RFID_RESTART_GRACE_MS = 10000;
+std::atomic<uint32_t> rfidHeartbeat{0}, rfidRestarts{0}, rfidReinits{0};
+TaskHandle_t rfidTask = nullptr;
 
 // RF tuning for range and responsiveness. Only the scan task touches reader registers after
 // setup; bench commands only change these atomics and raise the dirty flag.
@@ -113,6 +124,19 @@ void applyRfTuning(MFRC522& reader) {
   reader.PCD_WriteRegister(MFRC522::TReloadRegL, 0xA0);
 }
 
+// Hardware reset (one shared RST wire) and full re-initialisation of both readers. Scan task only.
+void resetReaders() {
+  for (uint8_t ss : READER_SS) digitalWrite(ss, HIGH);
+  digitalWrite(RC522_RST, LOW); vTaskDelay(pdMS_TO_TICKS(2)); digitalWrite(RC522_RST, HIGH); vTaskDelay(pdMS_TO_TICKS(50));
+  for (int r = 0; r < NREADER; r++) {
+    readers[r].PCD_Init(READER_SS[r], MFRC522::UNUSED_PIN);
+    applyRfTuning(readers[r]);
+    readers[r].PCD_AntennaOff();
+    readerVersion[r] = readers[r].PCD_ReadRegister(MFRC522::VersionReg);
+  }
+  rfidReinits++;
+}
+
 // Only this task touches SPI/readers after setup. Flash writes, LCD and network
 // reconnects no longer schedule RF polling. Retain brief taps in RAM until
 // the main loop can persist them. Fields alternate to avoid mutual interference.
@@ -120,7 +144,20 @@ void rfidScanTask(void*) {
   RfidTap taps[NREADER];
   uint32_t lastScan[NREADER]{};
   int next = 0;
+  if (rfidRestarts.load()) resetReaders();  // restarted by the watchdog: start from clean readers
+  uint32_t lastHeard[NREADER], lastHealth = millis();
+  for (auto& t : lastHeard) t = millis();
   for(;;) {
+    rfidHeartbeat.store(millis());
+    if (millis() - lastHealth >= RF_HEALTH_CHECK_MS) {
+      lastHealth = millis();
+      bool reset = false;
+      for (int o = 0; o < NREADER; o++) {
+        const uint8_t v = readers[o].PCD_ReadRegister(MFRC522::VersionReg);
+        reset |= v == 0x00 || v == 0xFF || millis() - lastHeard[o] >= RF_IDLE_REINIT_MS;
+      }
+      if (reset) { resetReaders(); for (auto& t : lastHeard) t = millis(); }
+    }
     const int selected = rfidOnly.load();
     const int r = selected >= 0 ? selected : next;
     next = (next + 1) % NREADER;
@@ -148,7 +185,7 @@ void rfidScanTask(void*) {
     }
     bool answered = wake==MFRC522::STATUS_OK || wake==MFRC522::STATUS_COLLISION;
     bool read = answered && reader.PICC_ReadCardSerial();
-    if(answered) readerAnswered[r]++;
+    if(answered) { readerAnswered[r]++; lastHeard[r] = millis(); }
     for(uint8_t t=0; answered && !read && t<RF_READ_RETRIES; t++) {
       // The tag is in the field but SELECT failed (edge of range, noise): retry while it is powered.
       readerReadFailed[r]++;
@@ -184,6 +221,30 @@ void requestManualTare();
 void clearManualTare();
 void requestEmptyTare();
 bool weighingConsole(const String& command);
+// Guidance from the laptop (tray loading): two lines shown on the LCD until guideUntil.
+// '#' in a line is replaced by the live tray weight, so "on tray #" stays real time.
+String guideLine[2];
+uint32_t guideUntil = 0;
+void showGuide(String raw) {
+  // "lcd <seconds> <line 1>|<line 2>" or "lcd off". Text keeps its case; only printable ASCII.
+  raw.trim();
+  String rest = raw.substring(3); rest.trim();
+  if (rest.equalsIgnoreCase("off")) { guideUntil = 0; Serial.println("LCD GUIDE off"); return; }
+  int space = rest.indexOf(' ');
+  long seconds = space > 0 ? rest.substring(0, space).toInt() : 0;
+  if (seconds < 1 || seconds > 600) { Serial.println("LCD GUIDE refused: lcd <1-600 s> <line1>|<line2>"); return; }
+  String text = rest.substring(space + 1);
+  int bar = text.indexOf('|');
+  String lines[2] = {bar >= 0 ? text.substring(0, bar) : text, bar >= 0 ? text.substring(bar + 1) : ""};
+  for (int r = 0; r < 2; r++) {
+    String clean;
+    for (char ch : lines[r]) if (ch >= 0x20 && ch <= 0x7E && clean.length() < 16) clean += ch;
+    guideLine[r] = clean;
+  }
+  guideUntil = millis() + (uint32_t)seconds * 1000;
+  if (!guideUntil) guideUntil = 1;
+  Serial.printf("LCD GUIDE %lds\n", seconds);
+}
 char rfidCommand[160] = {};
 unsigned rfidCommandLength = 0;
 bool rfidCommandOverflow = false;
@@ -205,6 +266,7 @@ void rfidConsole() {
       if(command=="tare"){requestManualTare();continue;}
       if(command=="tareempty"){requestEmptyTare();continue;}
       if(command=="untare"){clearManualTare();continue;}
+      if(command.startsWith("lcd")){showGuide(String(rfidCommand));continue;}
       if(command.startsWith("ack ")){
         String event=String(rfidCommand).substring(4); // event IDs are lower-case firmware IDs
         Serial.printf("SF_ACK %s %s\n",event.c_str(),bus.acknowledgeEvent(event)?"removed":"not_found");continue;
@@ -425,7 +487,9 @@ Snap snapshot() {
     }
   }
   if (s.calibrated && !weighing.fresh(now)) s.ready = false;
-  s.displayTotal = s.total;
+  // Within a step of the held weight the reading is drift or jitter: show the held whole
+  // grams. A bigger difference is a hand or item on the move: show it live.
+  s.displayTotal = hold.seededState() && fabs(s.total - hold.heldTotal()) < EVENT_HYSTERESIS_G ? hold.heldTotal() : s.total;
   if (!s.calibrated) addFlag(s.flags, "UNCALIBRATED");
   if (!s.ready && s.calibrated) addFlag(s.flags, "NOT_READY");
   s.noise = s.calibrated ? sqrt(var) : 0;
@@ -784,7 +848,8 @@ void tickManualTare(Snap& s, uint32_t now) {
   double tareReference[NCELL];
   for (int i = 0; i < NCELL; ++i) tareReference[i] = reference[i];
   weighing.setTare(tareReference, tareEmptyRequested);
-  hold.reset();
+  s = snapshot();
+  hold.tare(s.measured, now);  // readings were stable for the tare: they are exactly 0 now
   Serial.printf("AZT_EMPTY_CONFIRMED %s\n", tareEmptyRequested ? "yes (operator tareempty)" : "no (loaded-reference tare)");
   // The raw event baseline is retained: subtracting the same offset from pre/post
   // cannot invent a weight change or erase a genuine pending load change.
@@ -987,7 +1052,13 @@ void handleButtons(const Snap& s) {
 }
 
 // ---------------- Display ----------------
-String fmtG(float g) { char b[12]; snprintf(b, sizeof b, "%.1f", g); return b; }
+// Whole grams (held weights, an exact tare) print without a decimal; "-0" prints as "0".
+String fmtG(float g) {
+  char b[12];
+  if (fabsf(g - rintf(g)) < 0.005f) snprintf(b, sizeof b, "%.0f", rintf(g) == 0 ? 0.0f : rintf(g));
+  else snprintf(b, sizeof b, "%.1f", g);
+  return b;
+}
 bool renderQuickCheck();
 void render(const Snap& s) {
   if (svc != SVC_OFF) {
@@ -1007,7 +1078,15 @@ void render(const Snap& s) {
     lcdLine(0, "TARE WAIT..."); lcdLine(1, "RELEASE HANDS"); return;
   }
   if (tareMessage.length() && (int32_t)(tareMessageUntil - millis()) > 0) {
-    lcdLine(0, tareMessage); lcdLine(1, fmtG(s.total) + " g"); return;
+    lcdLine(0, tareMessage); lcdLine(1, fmtG(s.displayTotal) + " g"); return;
+  }
+  if (guideUntil && (int32_t)(guideUntil - millis()) > 0) {
+    for (int r = 0; r < 2; r++) {
+      String line = guideLine[r];
+      line.replace("#", s.calibrated ? fmtG(s.displayTotal) + "g" : String("UNCAL"));
+      lcdLine(r, line);
+    }
+    return;
   }
   switch (page) {
     case 0:
@@ -1169,16 +1248,44 @@ void setup() {
   if (lcdBegin()) { lcdLine(0, "ShelfFlow sensor"); lcdLine(1, "starting..."); }
   else Serial.println("LCD not found at 0x27/0x3F: continuing without display");
   rfidObservations=xQueueCreate(64,sizeof(RfidObservation));
-  if(!rfidObservations || xTaskCreatePinnedToCore(rfidScanTask,"rfid-scan",4096,nullptr,2,nullptr,0)!=pdPASS) {
+  if(!rfidObservations || xTaskCreatePinnedToCore(rfidScanTask,"rfid-scan",4096,nullptr,2,&rfidTask,0)!=pdPASS) {
     bus.lost();Serial.println("RFID_TASK_FAILED: no RFID capture available");
   }
   Serial.printf("RFID tap mode: 600ms absence to rearm; RAM=64 events; durable_queue=%u/%u\n",bus.queuedFiles,bus.QUEUE_CAPACITY);
+}
+
+// Main-loop half of the RFID self-healing (see rfidHeartbeat). Serial output stays in this task so the
+// scan task never interleaves text with the USB protocol lines.
+void rfidWatchdog() {
+  static uint32_t restartedAt = 0, reported = 0;
+  if (!rfidObservations) return;
+  const uint32_t now = millis(), beat = rfidHeartbeat.load();
+  if (rfidReinits.load() != reported) {
+    reported = rfidReinits.load();
+    Serial.printf("RFID_REINIT count=%lu versions=0x%02X/0x%02X\n", (unsigned long)reported, readerVersion[0], readerVersion[1]);
+  }
+  if (!beat || (int32_t)(now - beat) < (int32_t)RFID_STALL_MS) { restartedAt = 0; return; }
+  if (restartedAt) {
+    if (now - restartedAt < RFID_RESTART_GRACE_MS) return;
+    Serial.println("RFID_WATCHDOG restarted scan did not recover: restarting the controller");
+    delay(100);
+    ESP.restart();
+  }
+  Serial.printf("RFID_WATCHDOG scan silent %lu ms: restarting the RFID task\n", (unsigned long)(now - beat));
+  if (rfidTask) vTaskDelete(rfidTask);
+  rfidTask = nullptr;
+  rfidRestarts++;
+  rfidHeartbeat.store(now);
+  restartedAt = now;
+  if (xTaskCreatePinnedToCore(rfidScanTask, "rfid-scan", 4096, nullptr, 2, &rfidTask, 0) != pdPASS)
+    Serial.println("RFID_TASK_FAILED: watchdog could not restart RFID capture");
 }
 
 void loop() {
 #ifdef RFID_DIAGNOSTIC
   rfidConsole();
 #endif
+  rfidWatchdog();
   bus.tick();
   uint32_t now = millis();
   sampleCells();
@@ -1222,9 +1329,10 @@ void loop() {
       readerVersion[0], readerVersion[1],
       (unsigned long)readerReadCount[0].load(), (unsigned long)readerReadCount[1].load(), lcdAddr ? "ok" : "none", (int)svc,
       WiFi.status() == WL_CONNECTED ? "up" : "down", bus.mqtt.connected() ? "up" : "down", bus.storageOK ? "ok" : "MISSING");
-    Serial.printf("DIAG RFID_QUEUE durable=%u/%u ram=%u scan_gap_max_ms=%lu/%lu historical_overflow=%lu\n",
+    Serial.printf("DIAG RFID_QUEUE durable=%u/%u ram=%u scan_gap_max_ms=%lu/%lu historical_overflow=%lu beat_ms=%lu reinits=%lu restarts=%lu\n",
                   bus.queuedFiles,bus.QUEUE_CAPACITY,rfidObservations?(unsigned)uxQueueMessagesWaiting(rfidObservations):0,
-                  (unsigned long)rfidMaxScanGap[0].load(),(unsigned long)rfidMaxScanGap[1].load(),(unsigned long)bus.overflow);
+                  (unsigned long)rfidMaxScanGap[0].load(),(unsigned long)rfidMaxScanGap[1].load(),(unsigned long)bus.overflow,
+                  (unsigned long)(millis()-rfidHeartbeat.load()),(unsigned long)rfidReinits.load(),(unsigned long)rfidRestarts.load());
     // answered = a tag replied to wake-up; read = UID read; failed = replied but the read failed.
     Serial.printf("DIAG RFID_READERS R1 answered=%lu read=%lu failed=%lu | R2 answered=%lu read=%lu failed=%lu\n",
                   (unsigned long)readerAnswered[0].load(),(unsigned long)readerReadCount[0].load(),(unsigned long)readerReadFailed[0].load(),

@@ -127,13 +127,16 @@ def _owner(c, bindings):
     owners = {bindings[m][0] for m in c.marker_ids if m in bindings}
     return next(iter(owners)) if len(owners) == 1 and all(m in bindings for m in c.marker_ids) else None
 
-def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: dict, simulation: bool, elsewhere: dict | None = None):
+def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: dict, simulation: bool, elsewhere: dict | None = None,
+                   camera_stocked: bool = False):
     """Fusion for a unit-tracked tray.
 
     on_tray: unit dicts (id, product_id, weight_g, noise_g, spot) currently on the tray.
     in_cart: {session_id: [unit dicts]} units from this tray currently in each cart.
     elsewhere: {session_id: [unit dicts]} cart units taken from OTHER trays (to recognise a
                return put back on the wrong tray; such events always need staff confirmation).
+    camera_stocked: nothing on this tray was weighed in, so the camera names each product and the
+               weight only has to agree on the direction (pickup = down, return = up).
     Returns (vetoes, proposals, scores); proposals carry the exact unit_ids to move.
     """
     veto = []
@@ -171,6 +174,23 @@ def evaluate_units(event: DeviceEvent, on_tray: list, in_cart: dict, bindings: d
     action = event.candidates[0].action if event.candidates else None
     total = sum(c.quantity for c in event.candidates)
     vision = sorted(c.product_id for c in event.candidates if c.sku and c.product_id != "UNKNOWN" for _ in range(c.quantity))
+    if camera_stocked:
+        if event.weight and event.candidates:
+            delta = event.weight.post_g - event.weight.pre_g
+            if abs(delta) <= 3 * event.weight.noise_g + WEIGHT_FLOOR_G:
+                veto.append("ZERO_NET_REQUIRES_REVIEW")
+            elif (delta < 0) != (action == "PICKUP"):
+                veto.append("ACTION_WEIGHT_CONFLICT")
+        proposals, scores = [], []
+        for c, owner in zip(event.candidates, owners):
+            if not c.sku or c.product_id == "UNKNOWN":
+                veto.append("CAMERA_PRODUCT_UNKNOWN")
+            proposals.append({"session_id": owner, "product_id": c.product_id, "quantity": c.quantity, "action": c.action,
+                              "product_track": c.product_track, "unit_ids": [], "unit_alternatives": []})
+            scores.append({"identity": bool(owner and c.identity), "hand_product": c.hand_product, "sku": bool(c.sku),
+                           "quantity": True, "temporal": c.temporal, "weight": "ACTION_WEIGHT_CONFLICT" not in veto,
+                           "sensor_health": event.sensor_health.ok})
+        return sorted(set(veto)), proposals, scores
     chosen, alternatives, units_by_id, matches = None, [], {}, {}
     if event.weight and event.candidates:
         delta = event.weight.post_g - event.weight.pre_g

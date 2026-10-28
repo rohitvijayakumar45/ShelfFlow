@@ -39,7 +39,7 @@ def to_frame(box,origin):
 
 def run(args):
     config=json.loads(Path(args.config).read_text())
-    capture=Capture(args.camera,args.camera_key,args.mode,transport=args.transport,stream_url=getattr(args,'stream_url',None))
+    capture=Capture(args.camera,args.camera_key,args.mode,transport=args.transport,stream_url=getattr(args,'stream_url',None),latest=True)
     identifier=None
     unknown_check=None
     models={'pipeline':'vision.run/2'}  # model registry: stamped on every interaction event
@@ -104,7 +104,22 @@ def run(args):
     # starts pre_seconds in the past also sees the hand that reached in before the scale noticed.
     observations={tray:deque(maxlen=120) for tray in config['trays']}
     track_matches={}  # (tray, track id) -> last gallery Match, for weight-driven candidates
-    from vision.hands import MotionProof, annotate, split_bands, band_evidence, BAND_MARKERS
+    track_skus={}  # (tray, track id) -> last product named for that track (gallery or trained model)
+    from vision.hands import MotionProof, annotate, split_bands, band_evidence, BAND_MARKERS, track_candidates, BandConfirmer
+    # Bracelet confirmations (N frames in a row) go to the backend on their own thread: the camera loop never waits.
+    confirmers={tray:BandConfirmer(config.get('band_confirm_frames',5)) for tray in config['trays']}
+    import queue
+    sightings=queue.Queue(maxsize=100)
+    def send_sightings():
+        client=httpx.Client(base_url=args.backend,headers={'X-Device-Key':args.device_key},timeout=3)
+        while True:
+            body=sightings.get()
+            for _ in range(3):
+                try:
+                    client.post('/devices/vision-1/bracelet-seen',json=body).raise_for_status();break
+                except Exception as exc:
+                    print('Bracelet sighting not delivered:',type(exc).__name__,flush=True);time.sleep(0.5)
+    threading.Thread(target=send_sightings,name='bracelet-seen',daemon=True).start()
     band_markers={**BAND_MARKERS,**config.get('band_markers',{})}  # band class -> marker ID staff give that bracelet
     sensor_overflow={}  # device -> historical queue-overflow count last seen (the controller only ever counts up)
     def sensor_files():
@@ -160,14 +175,18 @@ def run(args):
         if tray in active:
             if weight:active[tray]['weight']=weight
             active[tray]['sources'].add(source)
-            active[tray]['finish']=min(now+config.get('post_seconds',2),active[tray]['deadline'])
+            if source!='BAND':  # only the scale (or motion/RFID) starts the closing countdown, never a bracelet
+                active[tray]['finish']=min(now+config.get('post_seconds',2),active[tray]['deadline'])
             return
         before=[products for timestamp,products in product_history[tray] if timestamp<=now-config.get('pre_seconds',2)]
         start=now-config.get('pre_seconds',2)
         proof=MotionProof(tuple(config['trays'][tray]['roi_px']) if config['trays'][tray].get('roi_px') else (0,0,1,1),start)
         for observed in observations[tray]:
             if observed[0]>=start:proof.observe(*observed)
-        active[tray]={'id':uuid.uuid4().hex,'start':start,'finish':now+config.get('post_seconds',2),'deadline':now+config.get('max_collection_seconds',15),'weight':weight,'sources':{source},'candidates':[], 'before_products':before[-1] if before else [],'proof':proof}
+        # A confirmed bracelet opens the window and keeps it open until the scale reports the pickup (the weight
+        # trigger then closes it post_seconds later), so the clip runs from the bracelet to the item leaving.
+        finish=now+(config.get('max_collection_seconds',15) if source=='BAND' else config.get('post_seconds',2))
+        active[tray]={'id':uuid.uuid4().hex,'start':start,'finish':finish,'deadline':now+config.get('max_collection_seconds',15),'weight':weight,'sources':{source},'candidates':[], 'before_products':before[-1] if before else [],'proof':proof}
         set_high(True)
     def spool_event(event):
         # Crash-safe laptop queue: write once per event, not every frame.
@@ -187,6 +206,7 @@ def run(args):
                             config['trays'][tray]['roi']=settings['roi']
                             config['trays'][tray]['load_open']=settings.get('load_open',False)
                             config['trays'][tray]['teach']=settings.get('teach')
+                    config['registry_readers']=remote.json().get('registry_readers',[])
                     if 'weights_enabled' in remote.json():
                         # Backend decides: with the scale off, collections start on motion/RFID and only
                         # moved items become candidates (staff then confirm them in the assisted workflow).
@@ -219,6 +239,11 @@ def run(args):
                     # Bracelet bands (Train-products classes) identify the shopper; they are never products.
                     detections,bands=split_bands(detections,band_markers)
                     band_markers_seen,band_hands=band_evidence(bands,(x1,y1),band_markers,config.get('band_hand_reach',3.0))
+                    for marker in confirmers[tray].update([m['id'] for m in band_markers_seen]):
+                        trigger(tray,'BAND')
+                        try:sightings.put_nowait({'marker':marker,'tray_id':tray,'frames':confirmers[tray].need,
+                                                  'seen_at':frame.capture_wall or time.time()})
+                        except queue.Full:pass
                     if unknown_check and detections:
                         try:detections=unknown_check.apply(crop,detections,tray)
                         except Exception as exc:print('Unknown check failed:',type(exc).__name__,flush=True)  # keep YOLO's names
@@ -234,6 +259,7 @@ def run(args):
                     items=[(d.track_id,tuple(to_frame(d.box,(x1,y1)))) for d in detections]
                     for d in detections:
                         if d.match is not None and d.track_id is not None:track_matches[(tray,d.track_id)]=d.match
+                        if d.track_id is not None and d.sku!='UNKNOWN':track_skus[(tray,d.track_id)]=d.sku
                     observed=(time.monotonic(),items,hands,tray_markers,f"{frame.boot_id}-{frame.sequence}")
                     observations[tray].append(observed)
                     if tray in active:active[tray]['proof'].observe(*observed)
@@ -255,6 +281,8 @@ def run(args):
                 sensor_overflow[event.device_id]=max(prior or 0,event.sensor_health.queue_overflow)
                 if event.tray_id not in config['trays']:continue
                 if event.event_type=='RFID':
+                    # Entry/exit registry readers are not at the shelf: their taps say nothing about a pickup.
+                    if any(ref=='RFID_READER:'+r for ref in event.evidence_refs for r in config.get('registry_readers',[])):continue
                     for ref in event.evidence_refs:
                         if ref.startswith('RFID:'):rfid_reads.append((time.monotonic(),ref[5:]))
                     if not config.get('weight_driven'):trigger(event.tray_id,'RFID')
@@ -282,8 +310,8 @@ def run(args):
                     collector['candidates']=movement_candidates(summary,{tid:m for (t,tid),m in track_matches.items() if t==tray},collector['id'])
                     if not collector['candidates']:
                         del active[tray];continue
-                seq+=1;cooldown[tray]=now
-                refs=capture.buffer.preserve(args.evidence,collector['id'],collector['start'],now,redact=redact)
+                seq+=1;cooldown[tray]=now;closed_wall=time.time()  # frame age is measured here, before saving the clip
+                refs=capture.buffer.preserve(args.evidence,collector['id'],collector['start'],now,redact=redact,background=True,max_frames=90)  # + SENSOR_EVENT etc. within the 100-ref limit
                 if collector.get('sensor_event'):refs.append('SENSOR_EVENT:'+collector['sensor_event'].event_id)
                 f=last_frame;sensor=collector.get('sensor_event')
                 candidates=collector['candidates']
@@ -295,6 +323,10 @@ def run(args):
                     if len(candidates)==1 and len(moved)==1 and (tray,moved[0]) in track_matches:
                         from vision.association import scores
                         for key,value in scores(track_matches[(tray,moved[0])]).items():setattr(candidates[0],key,value)
+                    # Two shoppers in one window: per-item candidates, each with the bracelet at its own hand.
+                    per_track=track_candidates(summary,{tid:v for (t,tid),v in track_skus.items() if t==tray},
+                                               {tid:m for (t,tid),m in track_matches.items() if t==tray},collector['id'],action)
+                    if per_track:candidates=per_track
                 if not candidates and fallback and weight and f is not None:
                     # Scale changed but no known item was seen: an open-vocabulary box gives reviewers something to look at.
                     still=cv2.imdecode(np.frombuffer(f.jpeg,np.uint8),cv2.IMREAD_COLOR)
@@ -302,6 +334,7 @@ def run(args):
                     if still is not None and fallback.detect(still[ry1:ry2,rx1:rx2]):refs.append('FALLBACK_DETECTOR:object_seen')
                 annotate(candidates,summary,action)
                 if len(track_matches)>2000:track_matches.clear()
+                if len(track_skus)>2000:track_skus.clear()
                 uids={uid for timestamp,uid in rfid_reads if collector['start']<=timestamp<=now}
                 flags=[]
                 if len(uids)>1:flags.append('MULTIPLE_RFID_OBSERVATIONS')
@@ -314,7 +347,7 @@ def run(args):
                 if weight:
                     for c in candidates:c.action='PICKUP' if weight.post_g<weight.pre_g else 'RETURN'
                 wall=time.time()
-                event=DeviceEvent(event_id=collector['id'],event_type='INTERACTION',device_id='vision-1',boot_id=boot,sequence_number=seq,tray_id=tray,capture_start=f.capture_wall-config.get('pre_seconds',2) if f and f.capture_wall else wall-4,capture_end=f.capture_wall if f and f.capture_wall else wall,monotonic_ms=int(now*1000),clock_synced=bool(f and sensor and sensor.clock_synced),clock_uncertainty_ms=max(f.clock_uncertainty_ms if f else 9999,sensor.clock_uncertainty_ms if sensor else 9999),calibration_version=sensor.calibration_version if sensor else 'UNSET',weight=weight,candidates=candidates,evidence_refs=refs,model_status=detectors[tray].status,sensor_health=Health(ok=not camera_failed and bool(sensor and sensor.sensor_health.ok),flags=flags+(['CAMERA_FAILURE'] if camera_failed else [])+(sensor.sensor_health.flags if sensor else ['NO_MATCHING_WEIGHT']),queue_overflow=overflow[0]),frame_age_ms=max(0,(wall-f.capture_wall)*1000) if f and f.capture_wall else 9999,frame_gap_ms=last_gap,blur=blur,
+                event=DeviceEvent(event_id=collector['id'],event_type='INTERACTION',device_id='vision-1',boot_id=boot,sequence_number=seq,tray_id=tray,capture_start=f.capture_wall-config.get('pre_seconds',2) if f and f.capture_wall else wall-4,capture_end=f.capture_wall if f and f.capture_wall else wall,monotonic_ms=int(now*1000),clock_synced=bool(f and sensor and sensor.clock_synced),clock_uncertainty_ms=max(f.clock_uncertainty_ms if f else 9999,sensor.clock_uncertainty_ms if sensor else 9999),calibration_version=sensor.calibration_version if sensor else 'UNSET',weight=weight,candidates=candidates,evidence_refs=refs,model_status=detectors[tray].status,sensor_health=Health(ok=not camera_failed and bool(sensor and sensor.sensor_health.ok),flags=flags+(['CAMERA_FAILURE'] if camera_failed else [])+(sensor.sensor_health.flags if sensor else ['NO_MATCHING_WEIGHT']),queue_overflow=overflow[0]),frame_age_ms=max(0,(closed_wall-f.capture_wall)*1000) if f and f.capture_wall else 9999,frame_gap_ms=last_gap,blur=blur,
                                   model_versions={**models,**({'gallery':identifier.gallery.version,'threshold':f"{identifier.threshold:.3f}",'margin':f"{identifier.margin:.3f}"} if identifier else {})})
                 spool_event(event);del active[tray]
             if not active:set_high(False)

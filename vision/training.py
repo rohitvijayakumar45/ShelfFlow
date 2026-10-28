@@ -284,16 +284,62 @@ def _inherited(parent, skip):
     return out
 
 
-def build_dataset(chosen, out, max_per_session=250, parent=None):
+AUTO_LABEL_CONF = 0.7  # the parent model's detections at least this sure become labels in new frames
+
+def _iou(a, b):
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - iw * ih
+    return iw * ih / union if union > 0 else 0.0
+
+class AutoLabeller:
+    """Labels what a recording did not: a clip records ONE thing (a product, a bracelet band), but other
+    products sit on the tray in the same frames. Unlabelled, training learns they are background and the
+    new model stops finding them. The parent model labels the products it confidently sees instead."""
+
+    def __init__(self, weights, device="cpu"):
+        from ultralytics import YOLO
+        self.model, self.device = YOLO(str(weights)), device
+        self.names = self.model.names
+        self.added = self.dropped = 0
+
+    def detect(self, image_path):
+        """[(product_id, box)] the parent is sure of in the image. Products only: the parent's bracelet-band
+        calls are what new band clips are recorded to correct (it confuses stripes and circles), so they
+        neither label frames nor veto them."""
+        result = self.model.predict(str(image_path), imgsz=self.model.overrides.get("imgsz", 320), conf=AUTO_LABEL_CONF,
+                                    device=self.device, verbose=False)[0]
+        return [(self.names[int(c)], b) for c, b in zip(result.boxes.cls.tolist(), result.boxes.xyxy.tolist())
+                if not self.names[int(c)].startswith("band-")]
+
+    def mislabelled(self, image_path, known):
+        """True when a recorded box sits on something the parent is sure is a different product, e.g. SAM
+        followed a band until the hand left the view, then jumped onto the jar next to it."""
+        bad = any(pid != own and _iou(box, other) >= 0.5 for pid, box in self.detect(image_path) for own, other in known)
+        self.dropped += bad
+        return bad
+
+    def extra(self, image_path, known):
+        """[(product_id, box)] the parent sees in the image that overlap no box in `known`."""
+        found = []
+        for pid, box in self.detect(image_path):
+            if all(_iou(box, other) < 0.3 for _, other in known + found):
+                found.append((pid, box))
+        self.added += len(found)
+        return found
+
+def build_dataset(chosen, out, max_per_session=250, parent=None, labeller=None):
     """YOLO dataset from included frames. Split by ~1 s chunks so near-identical neighbours never
     straddle train/val. Long clips are thinned evenly to max_per_session frames.
     parent: the dataset folder of the model this one builds on; its frames from recordings not in
-    `chosen` are carried over, so the new model = everything the parent knew + the new recordings."""
+    `chosen` are carried over, so the new model = everything the parent knew + the new recordings.
+    labeller: an AutoLabeller (the parent's weights) that labels the other products visible in new frames."""
     out = Path(out)
     usable = [s for s in chosen if s.meta.get("kind", "product") == "background" or s.meta.get("status") == "LABELLED"]
     inherited = _inherited(parent, {s.id for s in chosen}) if parent else []
     classes = sorted({pid for s in usable for f in s.included() for pid, _ in frame_objects(s, f)}
-                     | {pid for *_, rows in inherited for pid, _ in rows})
+                     | {pid for *_, rows in inherited for pid, _ in rows}
+                     | (set(labeller.names.values()) if labeller else set()))
     if not classes:
         raise ValueError("No labelled product frames are included yet")
     index = {pid: k for k, pid in enumerate(classes)}
@@ -322,7 +368,12 @@ def build_dataset(chosen, out, max_per_session=250, parent=None):
         for f in frames:
             split = f.get("split") or ("val" if f["i"] // CHUNK in val_chunks else "train")  # imported frames keep their split
             lines, keys = [], []
-            for pid, (x1, y1, x2, y2) in frame_objects(s, f):
+            objects = list(frame_objects(s, f))
+            if labeller and s.meta.get("kind", "product") != "background":  # background clips are the empty tray
+                if objects and labeller.mislabelled(s.frame_path(f["i"]), objects):
+                    continue  # the tracked box is on the wrong object: leave the frame out
+                objects += labeller.extra(s.frame_path(f["i"]), objects)
+            for pid, (x1, y1, x2, y2) in objects:
                 x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w, x2), min(h, y2)
                 lines.append(f"{index[pid]} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f}\n")
                 keys.append(pid)
@@ -334,8 +385,11 @@ def build_dataset(chosen, out, max_per_session=250, parent=None):
         raise ValueError(f"Too few usable frames to split train/validation for: {', '.join(missing)}. Record a longer clip.")
     names = "\n".join(f"  {k}: {pid}" for k, pid in enumerate(classes))
     (out / "data.yaml").write_text(f"path: {out.as_posix()}\ntrain: images/train\nval: images/val\nnames:\n{names}\n", encoding="utf-8")
-    write_json(out / "summary.json", {"classes": classes, "counts": counts, "inherited_frames": len(inherited)})
-    return {"classes": classes, "counts": counts, "inherited_frames": len(inherited), "yaml": str(out / "data.yaml")}
+    auto, dropped = (labeller.added, labeller.dropped) if labeller else (0, 0)
+    write_json(out / "summary.json", {"classes": classes, "counts": counts, "inherited_frames": len(inherited),
+                                      "auto_labels": auto, "dropped_mislabelled": dropped})
+    return {"classes": classes, "counts": counts, "inherited_frames": len(inherited), "auto_labels": auto,
+            "dropped_mislabelled": dropped, "yaml": str(out / "data.yaml")}
 
 
 # ---------------- Training subprocess ----------------
@@ -400,10 +454,15 @@ def train_main(a):
         model.add_callback("on_train_batch_end", batch_end)
         model.add_callback("on_fit_epoch_end", epoch_end)
         model.add_callback("on_train_end", train_end)
-        images = sum(1 for _ in (Path(a.data).parent / "images").rglob("*.jpg"))
+        # Camera frames are small (1655 images = 17 MB): decode them once into RAM instead of re-reading every
+        # epoch. With the cache, loader worker processes only cost memory: on Windows each one is a separate
+        # Python that loads its own PyTorch (~550 MB; train + validation loaders started ten), so run without.
+        image_bytes = sum(f.stat().st_size for f in (Path(a.data).parent / "images").rglob("*.jpg"))
+        cache = "ram" if image_bytes <= 1_000_000_000 else False
+        workers = 0 if cache and os.name == "nt" else a.workers
         model.train(data=a.data, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device, project=str(run), name="yolo",
-                    exist_ok=True, patience=max(10, a.epochs // 3), cache="ram" if images <= 1500 else False,
-                    workers=a.workers, plots=False, verbose=False, seed=0,
+                    exist_ok=True, patience=max(10, a.epochs // 3), cache=cache,
+                    workers=workers, plots=False, verbose=False, seed=0,
                     close_mosaic=0)  # no mid-run dataloader rebuild (~35 s on Windows); one fixed camera needs no final un-mosaicked phase
         trainer = model.trainer
         best = Path(trainer.best)

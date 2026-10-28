@@ -14,10 +14,18 @@ from backend.fusion import evaluate, evaluate_units, unit_tolerance
 from backend.schemas import DeviceEvent
 
 _local_lock = threading.RLock()
+_changes = 0  # bumped after each committed change staff screens show (carts, reviews, shelf events)
+
+def changes():
+    return _changes
+
+def staff_visible(db):
+    db.info["staff_visible"] = True
 
 @contextmanager
 def transaction():
     # One lock boundary for this small prototype. PostgreSQL lock also covers workers.
+    global _changes
     with _local_lock, SessionLocal() as db:
         if db.bind.dialect.name == "sqlite":
             db.execute(text("BEGIN IMMEDIATE"))
@@ -27,6 +35,8 @@ def transaction():
         try:
             yield db
             db.commit()
+            if db.info.pop("staff_visible", False):
+                _changes += 1
         except Exception:
             db.rollback()
             raise
@@ -42,9 +52,11 @@ def get(db, model, id_):
 
 def audit(db, actor, action, detail):
     db.add(Audit(actor=actor, action=action, detail=detail))
+    staff_visible(db)
 
 def emit(db, topic, payload):
     db.add(Outbox(topic=topic, payload=payload))
+    staff_visible(db)
 
 def new_customer(alias):
     with transaction() as db:
@@ -55,6 +67,20 @@ def new_customer(alias):
         db.add(session)
         db.flush()
         return session.id
+
+def next_visit(session_id):
+    """After the bill (bracelet handed over): the same customer's next visit, at the entry stage."""
+    with transaction() as db:
+        s = get(db, ShoppingSession, session_id)
+        if s.status not in ("COMPLETE", "CANCELLED"):
+            fail("Finish this visit first")
+        nxt = db.scalar(select(ShoppingSession).where(ShoppingSession.customer_id == s.customer_id, ShoppingSession.status == "ENTRY"))
+        if not nxt:
+            nxt = ShoppingSession(customer_id=s.customer_id)
+            db.add(nxt)
+            db.flush()
+        audit(db, "customer", "NEXT_VISIT", {"previous_session_id": s.id, "session_id": nxt.id})
+        return nxt.id
 
 def entry_qr(session_id):
     with transaction() as db:
@@ -133,6 +159,51 @@ def manual_assign(session_id, bracelet_id, actual_uid, physical_confirmed, reaso
             gate.state, gate.detail = "ASSIGNED", "MANUAL_RECOVERY"
         audit(db, actor, "MANUAL_ASSIGN", {"session_id": session_id, "bracelet_id": b.id, "reason": reason})
 
+ENTRY_TAP_S = 120        # the bracelet must have been tapped on the entry reader this recently
+EXIT_TAP_FRESH_S = 60    # an exit tap older than this when it reaches the laptop is only recorded
+EXIT_REQUEST_TTL_S = 120 # an exit that cannot be billed in this time is left to staff (customer may shop on)
+CHECKOUT_REQUEST_TTL_S = 900  # Checkout pressed in the app: the exit tap must follow within this time
+
+def camera_named(db, event, on_tray, in_cart, elsewhere):
+    """Is this a camera-stocked movement (the camera names the product, the weight only the direction)?
+    Yes when none of the products the camera named has weighed units that could be moving: on the tray for
+    a pickup, in an active cart for a return. A tray can mix both: one item put on as stock is weighed, the
+    rest stay camera-stocked. Units in a billed visit's cart are sold and gone; they never count."""
+    def active(sid):
+        visit = db.get(ShoppingSession, sid) if sid else None
+        return bool(visit and visit.status == "ACTIVE")
+    carts = [u for sid, units in {**elsewhere, **in_cart}.items() if active(sid) for u in units]
+    named = {c.product_id for c in event.candidates if c.sku and c.product_id != "UNKNOWN"}
+    pool = on_tray if all(c.action == "PICKUP" for c in event.candidates) else carts
+    if not named:
+        return not on_tray and not carts
+    return not any(u["product_id"] in named for u in pool)
+
+def sensor_healthy(health):
+    """A shelf event's health: no fault flags, and no lost events beyond the count staff accepted as history."""
+    overflow = health.get("queue_overflow") or 0
+    if health.get("flags") or overflow > settings.SENSOR_ACCEPTED_OVERFLOW:
+        return False
+    return bool(health.get("ok", False)) or overflow > 0  # with an accepted count the controller still says ok=false
+
+def tap_of(payload):
+    """(uid, reader) of an RFID event payload."""
+    refs = payload.get("evidence_refs") or []
+    return (next((r[5:] for r in refs if r.startswith("RFID:")), None),
+            next((r[12:] for r in refs if r.startswith("RFID_READER:")), None))
+
+def registry_readers():
+    return [r for r in (settings.ENTRY_READER, settings.EXIT_READER) if r]
+
+def recent_tap(db, uid, reader, seconds):
+    """Latest RFID event of this tag on this reader received in the last `seconds`."""
+    for e in db.scalars(select(SensorEvent).where(SensorEvent.received >= time.time() - seconds,
+                                                  SensorEvent.payload["event_type"].as_string() == "RFID")
+                        .order_by(SensorEvent.received.desc())):
+        if tap_of(e.payload) == (uid, reader):
+            return e
+    return None
+
 def _entry_session(db, token):
     qr = db.get(EntryToken, hashlib.sha256(token.encode()).hexdigest())
     if not qr:
@@ -162,6 +233,8 @@ def check_in(token, actual_uid, actor):
             fail(f"Bracelet {b.id} has no pattern set, so the camera could not tell who picked an item")
         if db.scalar(select(Bracelet).where(Bracelet.session_id == session.id)):
             fail("This visit already has a bracelet")
+        if MODE != "simulation" and settings.ENTRY_READER and not recent_tap(db, b.rfid, settings.ENTRY_READER, ENTRY_TAP_S):
+            fail(f"Tap bracelet {b.id} on the entry reader ({settings.ENTRY_READER}) first")
         qr.used = True
         b.state, b.session_id, session.status = "ASSIGNED", session.id, "ACTIVE"
         db.add(BraceletBinding(bracelet_id=b.id, session_id=session.id, rfid=b.rfid, markers=list(b.markers)))
@@ -169,22 +242,44 @@ def check_in(token, actual_uid, actor):
         emit(db, f"cart/{session.id}", {"version": session.cart_version, "status": session.status})
         return {"session_id": session.id, "bracelet_id": b.id, "markers": list(b.markers)}
 
+def concerns(db, h, session_id):
+    """Does this review item concern this visit? Its own items always; an item with no owner yet only when the
+    visit was at the shelf as it happened (it may be theirs), otherwise every shopper saw "Checking N items"
+    and was held at the exit for things done before they arrived or while someone else was alone there."""
+    if h.session_id is not None:
+        return h.session_id == session_id
+    if settings.CART_ATTRIBUTION not in ("rfid", "hybrid"):
+        return True  # camera attribution: the bracelet decides, presence is not tracked
+    present = (h.proposal or {}).get("shoppers_present")
+    if present is not None:
+        return session_id in present
+    event = db.get(SensorEvent, h.event_id)
+    if not event:
+        return True
+    from backend import shelf_cart
+    return any(sid == session_id for sid, _ in shelf_cart.shoppers_at_shelf(db, event.received))
+
 def cart(db, session_id):
     s = get(db, ShoppingSession, session_id)
     items = []
     for i in db.scalars(select(CartItem).where(CartItem.session_id == s.id, CartItem.quantity > 0).order_by(CartItem.product_id)):
         p = get(db, Product, i.product_id)
-        has_image = db.scalar(select(ProductReference.id).where(ProductReference.product_id == p.id, ProductReference.status == "ACTIVE").limit(1)) is not None
+        from backend.references import has_thumbnail
+        has_image = has_thumbnail(p.id) or db.scalar(select(ProductReference.id).where(ProductReference.product_id == p.id, ProductReference.status == "ACTIVE").limit(1)) is not None
         items.append({"product_id": p.id, "name": p.name, "quantity": i.quantity, "price_minor": i.price_minor, "has_image": has_image})
     pending = list(db.scalars(select(Hypothesis).where(Hypothesis.status.in_(["PENDING_REVIEW", "DISPUTED"]))))
     # Unknown ownership is relevant to every active session until staff reconciles it.
-    pending = [h for h in pending if h.session_id in (None, s.id)]
+    pending = [h for h in pending if concerns(db, h, s.id)]
     bracelet = db.scalar(select(Bracelet).where(Bracelet.session_id == s.id))
     order = db.scalar(select(Order).where(Order.session_id == s.id))
     receipt = db.scalar(select(Receipt).where(Receipt.order_id == order.id)) if order else None
     confirmed = list(db.scalars(select(Hypothesis).where(Hypothesis.session_id == s.id, Hypothesis.status == "CONFIRMED")))
     corrections = list(db.scalars(select(Correction).where(Correction.session_id == s.id)))
     return {"session_id": s.id, "status": s.status, "version": s.cart_version, "items": items,
+            "exit_requested": s.status == "ACTIVE" and exit_request(db, s.id) is not None,
+            "checkout_requested": s.status == "ACTIVE" and checkout_request(db, s.id) is not None,
+            "checkout_needs_tap": settings.EXIT_NEEDS_CHECKOUT and bool(settings.EXIT_READER), "exit_reader": settings.EXIT_READER,
+            "exit_blockers": [b["message"] for b in exit_blockers(db, s.id)] if s.status == "ACTIVE" and exit_request(db, s.id) else [],
             "total_minor": sum(i["quantity"] * i["price_minor"] for i in items), "currency": "INR",
             "pending": [{"id": h.id, "tray_id": h.tray_id, "reasons": h.reason, "status": h.status} for h in pending],
             "bracelet": {"id": bracelet.id, "state": bracelet.state, "markers": list(bracelet.markers)} if bracelet else None,
@@ -284,16 +379,24 @@ def apply_proposal(db, h, proposal, reviewed=False):
     delta = q if proposal["action"] == "PICKUP" else -q
     item = db.scalar(select(CartItem).where(CartItem.session_id == s.id, CartItem.product_id == p.id))
     if delta < 0 and (not item or item.quantity < q or (not tray.unit_tracking and item.tray_id != tray.id)):
-        fail("Return has no matching same-tray cart quantity")
-    if tray.unit_tracking:
+        fail("This shopper's cart has none of this product from this tray to put back. "
+             "If no cart holds it (staff restocking, or an item already billed), record it as stock instead.")
+    # On a unit-tracked tray a product with no weighed units here is stocked by the camera: no count to move.
+    # Units in a billed visit's cart are sold and gone: they never make a product "weighed".
+    counted = not tray.unit_tracking or proposal.get("unit_ids") or db.scalar(
+        select(TrayUnit.id).join(ShoppingSession, TrayUnit.session_id == ShoppingSession.id, isouter=True).where(
+            TrayUnit.tray_id == tray.id, TrayUnit.product_id == p.id,
+            (TrayUnit.status == "ON_TRAY") | ((TrayUnit.status == "IN_CART") & (ShoppingSession.status == "ACTIVE"))).limit(1))
+    if tray.unit_tracking and counted:
         move_units(db, tray, s, p, proposal, reviewed)
-    if delta > 0 and tray.stock < q:
+    if delta > 0 and counted and tray.stock < q:
         fail("Insufficient tray stock")
     if not item:
         item = CartItem(session_id=s.id, product_id=p.id, tray_id=tray.id, quantity=0, price_minor=p.price_minor)
         db.add(item)
     item.quantity += delta
-    tray.stock -= delta
+    if counted:
+        tray.stock -= delta
     s.cart_version += 1
     h.status = "CONFIRMED"
     h.session_id = s.id
@@ -328,7 +431,10 @@ def ingest(event: DeviceEvent):
         # device flash queue later, so HEALTH must not advance the ordering watermark.
         ordered = event.event_type != "HEALTH"
         late = ordered and device.boot_id == event.boot_id and event.sequence_number <= device.max_sequence
-        stale = time.time() - event.capture_end > 5 or event.capture_end > time.time() + 1
+        # A camera INTERACTION is sent after its evidence clip is saved (faces blurred frame by frame, ~0.1 s
+        # each), so it may arrive well after its window closed; its timing proof is the weight event it cites.
+        fresh_s = AUTO_WINDOW_S if event.event_type == "INTERACTION" else 5
+        stale = time.time() - event.capture_end > fresh_s or event.capture_end > time.time() + 1
         if device.boot_id != event.boot_id:
             # Old boot replay is accepted durably but never automatically charged.
             old_boot = db.scalar(select(SensorEvent).where(SensorEvent.device_id == device.id, SensorEvent.boot_id == event.boot_id, SensorEvent.id != event.event_id))
@@ -364,7 +470,21 @@ def ingest(event: DeviceEvent):
                 db.add(Calibration(tray_id=tray.id, metadata_={"source": "DEVICE", "device_id": event.device_id, "event_id": event.event_id,
                                                                "version": event.calibration_version, "previous": previous, **event.calibration.model_dump()}))
                 audit(db, event.device_id, "DEVICE_CALIBRATION", {"tray_id": tray.id, "version": event.calibration_version, "previous": previous})
-        if event.event_type == "INTERACTION":
+        if event.event_type == "RFID" and settings.EXIT_READER and not late:
+            uid, reader = tap_of(event.model_dump())
+            if reader == settings.EXIT_READER and uid:
+                b = db.scalar(select(Bracelet).where(Bracelet.rfid == uid))
+                if not settings.EXIT_NEEDS_CHECKOUT or (b and b.session_id and checkout_request(db, b.session_id)):
+                    request_exit(db, uid, event)
+                # otherwise it is an ordinary tap: the shopper is at the shelf (backend/shelf_cart.py)
+        if event.event_type == "WEIGHT" and settings.CART_ATTRIBUTION in ("rfid", "hybrid") and MODE != "simulation":
+            from backend import shelf_cart
+            shelf_cart.weight_step(db, row, event, late, stale)
+        if event.event_type == "INTERACTION" and settings.CART_ATTRIBUTION in ("rfid", "hybrid"):
+            # The shelf weight step decides (the shopper at the shelf, or the bracelet sighted nearest in time): evidence only.
+            audit(db, event.device_id, "INTERACTION_EVIDENCE_ONLY", {"event_id": event.event_id, "reason": "rfid attribution"})
+            db.add(Evidence(id=row.id, event_id=row.id, references=event.evidence_refs, expires=time.time() + 86400 * int(os.getenv("EVIDENCE_RETENTION_DAYS","7"))))
+        elif event.event_type == "INTERACTION":
             tray = get(db, Tray, event.tray_id)
             product = get(db, Product, tray.product_id)
             bindings = {}
@@ -375,13 +495,19 @@ def ingest(event: DeviceEvent):
                         bindings[m]=(None,'CONFLICTING_BINDING_INTERVAL')
                     else:
                         bindings[m] = (b.session_id, b.rfid)
+            if sensor_healthy(event.sensor_health.model_dump()) and not event.sensor_health.ok:
+                # Only the controller's accepted lost-event history marks it unhealthy (SENSOR_ACCEPTED_OVERFLOW).
+                event = event.model_copy(update={"sensor_health": event.sensor_health.model_copy(update={"ok": True, "queue_overflow": 0})})
+            camera_stocked = False  # a per-item tray with nothing weighed in: the camera names products, no count
             if tray.unit_tracking:
                 on_tray, in_cart = unit_pools(db, tray.id)
                 elsewhere = {}
                 for other in db.scalars(select(Tray).where(Tray.unit_tracking == True, Tray.id != tray.id)):
                     for sid, units in unit_pools(db, other.id)[1].items():
                         elsewhere.setdefault(sid, []).extend(units)
-                veto, proposals, scores = evaluate_units(event, on_tray, in_cart, bindings, MODE == "simulation", elsewhere)
+                camera_stocked = camera_named(db, event, on_tray, in_cart, elsewhere)
+                veto, proposals, scores = evaluate_units(event, on_tray, in_cart, bindings, MODE == "simulation", elsewhere,
+                                                         camera_stocked=camera_stocked)
             else:
                 veto, proposals, scores = evaluate(event, product, bindings, MODE == "simulation")
             source_reasons,_=source_vetoes(db,row.id,tray.id)
@@ -416,7 +542,7 @@ def ingest(event: DeviceEvent):
                     item = db.scalar(select(CartItem).where(CartItem.session_id == sid, CartItem.product_id == pid))
                     if not item or item.quantity < -delta or (not tray.unit_tracking and item.tray_id != tray.id):
                         veto.append("RETURN_WITHOUT_MATCHING_CART")
-            if total_delta > tray.stock:
+            if total_delta > tray.stock and not camera_stocked:
                 veto.append("INSUFFICIENT_STOCK")
             # Tracker IDs must be scoped to clip; a claimed trajectory cannot charge twice.
             tracks = {p["product_track"] for p in proposals}
@@ -434,9 +560,11 @@ def ingest(event: DeviceEvent):
             db.add(Evidence(id=row.id, event_id=row.id, references=event.evidence_refs, expires=time.time() + 86400 * int(os.getenv("EVIDENCE_RETENTION_DAYS","7"))))
         row.processed = True
         emit(db, f"shelfflow/devices/{device.id}/acks", {"event_id": event.event_id, "boot_id": event.boot_id, "sequence_number": event.sequence_number, "durable": True})
+        if event.event_type == "HEALTH":
+            db.info.pop("staff_visible", None)  # every 2 s; the live weight reaches staff screens on its own
         return {"ack": event.event_id, "durable": True, "duplicate": False}
 
-def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
+def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None, product_id=None):
     if not reason.strip():
         fail("Review reason required")
     with transaction() as db:
@@ -449,6 +577,8 @@ def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
             if not settings.WEIGHTS_ENABLED:
                 fail('Weight integration is unavailable; record the physically observed item in Assisted workflow')
             proposal = {**h.proposal, "session_id": session_id, "quantity": quantity}
+            if product_id:
+                proposal["product_id"] = get(db, Product, product_id).id
             if "action" not in proposal:
                 fail("No observed action to confirm; use reconciliation correction")
             if unit_ids is not None:
@@ -457,16 +587,170 @@ def review(hid, decision, session_id, quantity, reason, actor, unit_ids=None):
                 if len(products) != 1:
                     fail("Confirm one product per decision; split mixed units into separate corrections")
                 proposal.update(unit_ids=list(unit_ids), product_id=products.pop(), quantity=len(unit_ids))
+            if not proposal.get("product_id"):
+                fail("Choose the product that moved")
             apply_proposal(db, h, proposal, reviewed=True)
+        elif decision == "RESTOCK":
+            # An item put on the tray that no cart holds: new stock. On a weighed tray it becomes a weighed unit.
+            if h.proposal.get("source") != "SHELF_WEIGHT" or h.proposal.get("action") != "RETURN":
+                fail("Only a shelf weight increase can be recorded as stock")
+            product = get(db, Product, product_id or h.proposal.get("product_id") or "")
+            tray = get(db, Tray, h.tray_id)
+            claim_sources(db, h.event_id, tray.id)
+            event = get(db, SensorEvent, h.event_id).payload
+            if tray.unit_tracking:
+                now = time.time()
+                load = TrayLoad(tray_id=tray.id, actor=actor, reason="Review: put on the tray as stock", status="CLOSED", started=now, ended=now)
+                db.add(load)
+                db.flush()
+                db.add(TrayUnit(tray_id=tray.id, product_id=product.id, load_id=load.id, source_event_id=h.event_id,
+                                weight_g=event["weight"]["post_g"] - event["weight"]["pre_g"], noise_g=event["weight"]["noise_g"],
+                                crop_refs=[], reference_status="NO_STILLS"))
+                db.flush()
+                sync_unit_stock(db, tray)
+            else:
+                if product.id != tray.product_id:
+                    fail("This tray holds one product only")
+                tray.stock += quantity
+            db.add(InventoryMovement(tray_id=tray.id, delta=1 if tray.unit_tracking else quantity, reason="RESTOCK_REVIEW", reference=h.id))
+            h.status = "DISMISSED"
+        elif decision == "LEFT_TRAY":
+            # The scale proved the item left, but nobody is charged (e.g. staff took it): stock follows the scale.
+            if h.proposal.get("source") != "SHELF_WEIGHT" or h.proposal.get("action") != "PICKUP":
+                fail("Only a shelf weight pickup can be recorded as leaving the tray uncharged")
+            tray = get(db, Tray, h.tray_id)
+            for unit_id in h.proposal.get("unit_ids") or []:
+                u = get(db, TrayUnit, unit_id)
+                if u.status != "ON_TRAY":
+                    fail("That unit is no longer on the tray")
+                u.status, u.updated = "REMOVED", time.time()
+                db.add(InventoryMovement(tray_id=tray.id, delta=-1, reason="LEFT_TRAY_UNCHARGED", reference=h.id))
+            if h.proposal.get("unit_ids"):
+                sync_unit_stock(db, tray)
+            h.status = "DISMISSED"
         else:
             h.status = "DISMISSED"
-        db.add(ReviewDecision(hypothesis_id=h.id, actor=actor, decision={"decision": decision, "session_id": session_id, "quantity": quantity, "reason": reason, "unit_ids": unit_ids}))
+        db.add(ReviewDecision(hypothesis_id=h.id, actor=actor, decision={"decision": decision, "session_id": session_id, "quantity": quantity, "reason": reason, "unit_ids": unit_ids, "product_id": product_id}))
         audit(db, actor, "REVIEW", {"hypothesis_id": h.id, "decision": decision, "reason": reason})
+
+def request_exit(db, uid, event):
+    """A bracelet was tapped on the exit reader: register that its visit wants to leave. Billing happens
+    in process_exit_requests (outside this transaction), as soon as nothing blocks it."""
+    if time.time() - event.capture_end > EXIT_TAP_FRESH_S:
+        audit(db, event.device_id, "EXIT_TAP_IGNORED", {"event_id": event.event_id, "uid": uid, "reason": "stale"})
+        return
+    b = db.scalar(select(Bracelet).where(Bracelet.rfid == uid))
+    s = db.get(ShoppingSession, b.session_id) if b and b.session_id else None
+    if not b or b.state != "ASSIGNED" or not s or s.status != "ACTIVE":
+        audit(db, event.device_id, "EXIT_TAP_IGNORED", {"event_id": event.event_id, "uid": uid, "reason": "no active visit"})
+        return
+    audit(db, event.device_id, "EXIT_TAP", {"event_id": event.event_id, "session_id": s.id, "bracelet_id": b.id})
+    emit(db, f"cart/{s.id}", {"version": s.cart_version, "status": s.status, "exit_requested": True})
+
+def checkout_request(db, session_id):
+    """Time the customer pressed Checkout in the app (unexpired and not withdrawn), or None."""
+    for a in db.scalars(select(Audit).where(Audit.action.in_(["CHECKOUT_REQUESTED", "CHECKOUT_WITHDRAWN"]),
+                                            Audit.created >= time.time() - CHECKOUT_REQUEST_TTL_S).order_by(Audit.created.desc())):
+        if a.detail.get("session_id") == session_id:
+            return a.created if a.action == "CHECKOUT_REQUESTED" else None
+    return None
+
+def request_checkout(session_id, withdraw=False):
+    """Customer pressed Checkout (or Keep shopping): the next exit-reader tap of their bracelet bills the visit."""
+    with transaction() as db:
+        s = get(db, ShoppingSession, session_id)
+        b = db.scalar(select(Bracelet).where(Bracelet.session_id == s.id, Bracelet.state == "ASSIGNED"))
+        if s.status != "ACTIVE" or not b:
+            fail("Checkout needs an active visit with a bracelet")
+        audit(db, "customer", "CHECKOUT_WITHDRAWN" if withdraw else "CHECKOUT_REQUESTED", {"session_id": s.id, "bracelet_id": b.id})
+        emit(db, f"cart/{s.id}", {"version": s.cart_version, "checkout_requested": not withdraw})
+        return {"session_id": s.id, "checkout_requested": not withdraw, "exit_reader": settings.EXIT_READER}
+
+def exit_request(db, session_id):
+    """Time of this visit's latest unexpired exit tap, or None."""
+    for a in db.scalars(select(Audit).where(Audit.action == "EXIT_TAP", Audit.created >= time.time() - EXIT_REQUEST_TTL_S)
+                        .order_by(Audit.created.desc())):
+        if a.detail.get("session_id") == session_id:
+            return a.created
+    return None
+
+def pending_exits(db):
+    """Active visits whose bracelet was tapped on the exit reader recently, with what still blocks the bill."""
+    seen, out = set(), []
+    for a in db.scalars(select(Audit).where(Audit.action == "EXIT_TAP", Audit.created >= time.time() - EXIT_REQUEST_TTL_S)
+                        .order_by(Audit.created.desc())):
+        sid = a.detail.get("session_id")
+        s = db.get(ShoppingSession, sid) if sid else None
+        if sid in seen or not s or s.status != "ACTIVE":
+            continue
+        seen.add(sid)
+        out.append({"session_id": sid, "customer_alias": db.get(Customer, s.customer_id).alias, "bracelet_id": a.detail.get("bracelet_id"),
+                    "tapped": a.created, "blockers": exit_blockers(db, sid)})
+    return out
+
+def process_exit_requests():
+    """Bill every exit-tapped visit that nothing blocks. Safe to repeat: one bill per visit."""
+    with transaction() as db:
+        ready = [x["session_id"] for x in pending_exits(db) if not x["blockers"]]
+    done = []
+    for sid in ready:
+        try:
+            done.append(checkout(sid, f"exit-{sid}", "SUCCESS", True, "Bracelet tapped on the exit reader", "exit-reader"))
+        except HTTPException:
+            pass  # something new blocks it (a late event); retried on the next pass
+    return done
+
+EXIT_SETTLE_S = AUTO_WINDOW_S + 5  # a shelf change this recent may still become a camera event
+
+def exit_blockers(db, session_id):
+    """Why this visit cannot be billed yet (empty list: ready). Shown to staff at the exit."""
+    blockers = []
+    pending = [h for h in db.scalars(select(Hypothesis).where(Hypothesis.status.in_(["PENDING_REVIEW", "DISPUTED"]),
+                                                              (Hypothesis.session_id == session_id) | (Hypothesis.session_id == None)))
+               if concerns(db, h, session_id)]
+    if pending:
+        blockers.append({"code": "PENDING_REVIEW", "count": len(pending), "ids": [h.id for h in pending],
+                         "message": f"{len(pending)} pickup/return event(s) need a decision in the Review queue"})
+    if db.scalar(select(SensorEvent.id).where(SensorEvent.processed == False).limit(1)):
+        blockers.append({"code": "EVENTS_PROCESSING", "message": "Shelf events are still being processed: wait a moment"})
+    if MODE != "simulation":
+        # The camera sends its event up to AUTO_WINDOW_S after the shelf weight changed. A recent weight
+        # change that no camera event has used yet may still belong to this customer.
+        now = time.time()
+        for e in db.scalars(select(SensorEvent).where(SensorEvent.received >= now - EXIT_SETTLE_S,
+                                                      SensorEvent.payload["event_type"].as_string() == "WEIGHT")):
+            w = e.payload.get("weight") or {}
+            if abs((w.get("post_g") or 0) - (w.get("pre_g") or 0)) < 8 or db.get(SensorClaim, e.id):
+                continue
+            if db.scalar(select(Hypothesis.id).where(Hypothesis.event_id == e.id).limit(1)):
+                continue  # already decided from the shelf weight itself (rfid attribution)
+            used = db.scalar(select(SensorEvent.id).where(SensorEvent.device_id == "vision-1",
+                                                          SensorEvent.payload["evidence_refs"].as_string().contains("SENSOR_EVENT:" + e.id)).limit(1))
+            if not used:
+                blockers.append({"code": "SHELF_EVENT_IN_FLIGHT", "wait_s": round(e.received + EXIT_SETTLE_S - now),
+                                 "message": "A shelf weight change is still being matched with the camera: wait a few seconds"})
+                break
+    return blockers
 
 def staff_exit(session_id, actor):
     """Staff check the customer out at the exit. One payment key per visit, so pressing it again (or a
     repeated exit event) returns the original bill instead of making a second one."""
     return checkout(session_id, f"exit-{session_id}", "SUCCESS", True, "Checked out by staff at the exit", actor)
+
+def end_visit_binding(db, s, handed_over=False):
+    """Visit over: the bracelet stops naming this customer for anything captured from now on. Handed over at
+    the exit reader (the customer tapped it there to check out), it is released for the next customer at
+    once; otherwise it stays out of circulation (AWAITING_RETURN) until staff confirm it came back."""
+    now = time.time()
+    for binding in db.scalars(select(BraceletBinding).where(BraceletBinding.session_id == s.id, BraceletBinding.ended == None)):
+        binding.ended = now
+    b = db.scalar(select(Bracelet).where(Bracelet.session_id == s.id))
+    if b and b.state == "ASSIGNED":
+        if handed_over:
+            b.session_id, b.clean, b.state = None, True, "AVAILABLE"
+            audit(db, "exit-reader", "BRACELET_AUTO_RELEASED", {"bracelet_id": b.id, "session_id": s.id})
+        else:
+            b.state = "AWAITING_RETURN"
 
 def checkout(session_id, key, outcome, assisted, reason, actor):
     with transaction() as db:
@@ -479,13 +763,12 @@ def checkout(session_id, key, outcome, assisted, reason, actor):
             return {"payment_id": old.id, "state": old.state, "order_id": old.order_id}
         if s.status != "ACTIVE":
             fail("Session not active")
-        if db.scalar(select(Hypothesis).where(Hypothesis.status.in_(["PENDING_REVIEW", "DISPUTED"]), (Hypothesis.session_id == session_id) | (Hypothesis.session_id == None))):
-            fail("Resolve pending events before payment; egress always remains open")
-        if db.scalar(select(SensorEvent).where(SensorEvent.processed == False)):
-            fail("Durably ingested events still processing")
+        blockers = exit_blockers(db, session_id)
+        if blockers:
+            fail("Resolve pending events before payment; egress always remains open: " + "; ".join(b["message"] for b in blockers))
         if MODE != "simulation":
             # Require audited reconciliation even with recent barriers; offline unseen events cannot be inferred absent.
-            if not assisted or not reason.strip() or actor != "staff":
+            if not assisted or not reason.strip() or actor not in ("staff", "exit-reader"):
                 fail("Hardware mode requires staff reconciliation and device flush-barrier inspection")
             checkpoints=list(db.scalars(select(FlushBarrier).where(FlushBarrier.session_id==session_id)))
             audit(db,actor,"EXIT_RECONCILIATION",{"session_id":session_id,"barriers":[{"device":b.device_id,"event":b.acknowledged_event,"requested":b.requested} for b in checkpoints],"offline_override_reason":reason})
@@ -500,7 +783,10 @@ def checkout(session_id, key, outcome, assisted, reason, actor):
         db.add(Payment(id=key, order_id=order.id, state=outcome))
         if outcome == "SUCCESS":
             order.status, s.status = "PAID", "COMPLETE"
+            end_visit_binding(db, s, handed_over=actor == "exit-reader" and settings.EXIT_NEEDS_CHECKOUT)
+            # No payment provider is connected: the bill is final, but no money was collected.
             db.add(Receipt(order_id=order.id, content={"order_id": order.id, "session_id": session_id, "items": order.snapshot, "total_minor": order.total_minor, "currency": "INR", "payment": "SIMULATED", "created": time.time(),
+                "bill_status": "FINAL", "payment_status": "SIMULATED_NOT_COLLECTED",
                 "workflow": "SENSOR_REVIEW" if settings.WEIGHTS_ENABLED else "ASSISTED_NO_WEIGHTS", "weight_verified": settings.WEIGHTS_ENABLED}))
         audit(db, actor, "SIMULATED_PAYMENT", {"session_id": session_id, "outcome": outcome, "assisted": assisted, "reason": reason})
         emit(db, f"cart/{s.id}", {"version": s.cart_version, "status": s.status})
@@ -625,7 +911,7 @@ def add_unit(load_id, product_id, weight_event_id, spot, crop_refs, actor):
         health = e.get("sensor_health") or {}
         if e["event_type"] != "WEIGHT" or e["tray_id"] != tray.id:
             fail("Unit weight must come from this tray's WEIGHT event")
-        if not w.get("settled") or not health.get("ok", False) or health.get("flags") or health.get("queue_overflow"):
+        if not w.get("settled") or not sensor_healthy(health):
             fail("Weight event is unsettled or the sensor is unhealthy")
         if e["calibration_version"] != tray.calibration_version or tray.calibration_version == "UNSET":
             fail("Weight event calibration does not match the tray's current calibration")
